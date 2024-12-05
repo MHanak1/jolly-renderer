@@ -1,0 +1,144 @@
+use std::num::NonZeroU32;
+use std::rc::Rc;
+use winit::event::{Event, WindowEvent};
+use winit::event_loop::{ControlFlow, EventLoop};
+use winit::window::Window;
+
+#[path = "utils/winit_app.rs"]
+mod winit_app;
+
+struct Line {
+    start: [f32; 3],
+    end: [f32; 3],
+}
+
+struct LineCollection {
+    transform_matrix: [[f64; 3]; 3],
+    lines: Vec<Line>
+}
+
+struct BufferHandler {
+    width: usize,
+    height: usize,
+}
+
+impl BufferHandler{
+    fn new(width: usize, height: usize) -> BufferHandler {
+        BufferHandler {
+            width,
+            height,
+        }
+    }
+
+    fn draw_line (&self, buffer: &mut [u32], (x_start, y_start): (usize, usize), (x_end, y_end): (usize, usize), color: [u8; 4]) {
+//stolen from wikipedia
+        let (mut x, mut y) = (x_start, y_start);
+        let (dx, dy) = (x_end - x, y_end - y);
+        let mut d : i32 = 2 * dy as i32 - dx as i32;
+        let mut D = 0.0;
+        let length = f64::sqrt((dx * dx) as f64 + (dy * dy) as f64);
+
+        let sin = dx as f64 / length;
+        let cos = dy as f64 / length;
+
+        while x <= x_end {
+            x += 1;
+            //println!("x: {}, y: {}", x, y);
+            
+            //will figure out the anti-aliasing later
+            
+            //if y > 0 {self.set_color_with_alpha(buffer, (x, y - 1), [color[0], color[1], color[2], f64::floor(color[3] as f64 * f64::clamp(f64::abs(D + sin - 1.0) , 0.0, 1.0)) as u8])}
+            self.set_color_with_alpha(buffer, (x, y), color);
+            //if y < self.height {self.set_color_with_alpha(buffer, (x, y + 1), [color[0], color[1], color[2], f64::floor(color[3] as f64 * f64::clamp(1.0 - (D - sin), 0.0, 1.0)) as u8])}
+
+            if d <= 0 {
+                D = D + sin;
+                d = d + 2 * dy as i32;
+            } else {
+                D = D + sin - cos;
+                d = d + 2 * (dy as i32 - dx as i32);
+                y = y + 1;
+            }
+        }
+
+
+    }
+
+    fn set_color_with_alpha (&self, buffer: &mut [u32], (x, y): (usize, usize), color: [u8; 4]) {
+        let mut new_color = self.get_color(buffer, (x, y));
+        for i in 0..2 {
+            new_color[i] = f64::floor(new_color[i] as f64 * (1.0 - color[3] as f64) / 255.0 + color[i] as f64 * (color[3] as f64) / 255.0 ) as u8
+        }
+        self.set_color(buffer, (x, y), new_color)
+    }
+
+    fn set_color (&self, buffer: &mut [u32], (x, y): (i32, i32), color: [u8; 3]) {
+        if (x < 0 || x > self.width as i32 || y < 0 || y > self.height as i32) {return}
+        buffer[x as usize + y as usize * self.width] =    
+            ((color[0] as u32) << 16) +
+            ((color[1] as u32) <<  8) +
+            ((color[2] as u32) <<  0)
+    }
+
+    fn get_color (&self, buffer: &[u32], (x, y): (usize, usize)) -> [u8; 3]{
+        let col: [u8; 4] = buffer[x + y * self.width].to_be_bytes();
+        return [col[1], col[2], col[3]];
+
+    }
+}
+
+fn draw_to_buffer(buffer: &mut [u32], buffer_handler: BufferHandler) {
+       buffer_handler.draw_line(buffer, (0, 0), (300, 100), [255, 255, 0, 255]);
+}
+
+fn main() {
+    let event_loop = EventLoop::new().unwrap();
+
+    let mut app = winit_app::WinitAppBuilder::with_init(|elwt| {
+        let window = {
+            let window = elwt.create_window(Window::default_attributes());
+            Rc::new(window.unwrap())
+        };
+        let context = softbuffer::Context::new(window.clone()).unwrap();
+        let surface = softbuffer::Surface::new(&context, window.clone()).unwrap();
+
+        (window, surface)
+    }).with_event_handler(|state, event, elwt| {
+        let (window, surface) = state;
+        elwt.set_control_flow(ControlFlow::Wait);
+
+        let mut buffer_handler = BufferHandler::new(window.inner_size().width as usize, window.inner_size().height as usize);
+
+        match event {
+            Event::WindowEvent { window_id, event: WindowEvent::RedrawRequested } if window_id == window.id() => {
+                let (width, height) = {
+                    let size = window.inner_size();
+                    (size.width, size.height)
+                };
+                surface
+                    .resize(
+                        NonZeroU32::new(width).unwrap(),
+                        NonZeroU32::new(height).unwrap(),
+                    )
+                    .unwrap();
+                
+                let mut buffer = surface.buffer_mut().unwrap();
+                buffer_handler.width = width as usize;
+                buffer_handler.height = height as usize;
+
+                draw_to_buffer(&mut buffer, buffer_handler);
+
+                buffer.present().unwrap();
+            }
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                window_id,
+            } if window_id == window.id() => {
+                elwt.exit();
+            }
+            _ => {}
+        }
+    });
+
+    event_loop.run_app(&mut app).unwrap();
+}
