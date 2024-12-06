@@ -2399,6 +2399,7 @@ version = "0.1.0"
 dependencies = [
  "dyn-clone",
  "image",
+ "itertools",
  "rand 0.9.0-beta.1",
  "softbuffer",
  "winit",

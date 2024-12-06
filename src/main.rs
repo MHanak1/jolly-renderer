@@ -11,6 +11,8 @@ use winit::window::WindowBuilder;
 use dyn_clone::DynClone;
 use image::{GenericImage, Pixel, RgbaImage};
 use rand::random;
+use itertools::Itertools;
+use rand::seq::IndexedRandom;
 
 #[path = "utils/winit_app.rs"]
 mod winit_app;
@@ -335,17 +337,19 @@ impl Font {
     }
 }
 
-trait Element: DynClone {
+trait DrawableElement: DynClone {
     fn update(&mut self, dt: Duration);
-    fn render(&self, renderer: &Renderer, buffer: &mut [u32]);
+    fn render(&self, renderer: &Renderer, buffer: &mut [u32], depth_buffer: &mut Vec<f32>);
+    fn set_size(&mut self, size: f32);
+    fn get_color(&self) -> [u8; 4];
+    fn set_color(&mut self, color: [u8; 4]);
     fn transform_by(&mut self, matrix: Matrix3<f32>);
     fn scale_by(&mut self, scalar: f32);
-    fn set_size(&mut self, size: f32);
     fn offset(&mut self, offset: [f32; 3]);
     fn get_pos(&self) -> Vector3;
     fn get_depth(&self) -> f32;
 }
-dyn_clone::clone_trait_object!(Element);
+dyn_clone::clone_trait_object!(DrawableElement);
 
 #[derive(Clone)]
 struct Line {
@@ -368,7 +372,7 @@ impl Line {
     }
 }
 
-impl Element for Line {
+impl DrawableElement for Line {
     //TODO: unfuck this code (i mean it works but it really hurts to look at)
     fn update(&mut self, time_delta: Duration) {
         let mut new = self.clone();
@@ -379,10 +383,22 @@ impl Element for Line {
         *self = new;
     }
 
-    fn render(&self, renderer: &Renderer, buffer: &mut [u32]){
+    fn render(&self, renderer: &Renderer, buffer: &mut [u32], depth_buffer: &mut Vec<f32>) {
         let line_start = renderer.get_pixel_pos([self.start.x(), self.start.y()]);
         let line_end = renderer.get_pixel_pos([self.end.x(), self.end.y()]);
-        renderer.draw_line(buffer, (line_start[0], line_start[1]), (line_end[0], line_end[1]), self.color);
+        renderer.draw_line(buffer, depth_buffer, (line_start[0], line_start[1], self.start.z()), (line_end[0], line_end[1], self.end.z()), self.color);
+    }
+
+    fn set_size(&mut self, size: f32) {
+        self.width = size;
+    }
+
+    fn get_color(&self) -> [u8; 4] {
+        self.color
+    }
+
+    fn set_color(&mut self, color: [u8; 4]) {
+        self.color = color;
     }
 
     fn transform_by(&mut self, matrix: Matrix3<f32>) {
@@ -393,10 +409,6 @@ impl Element for Line {
     fn scale_by(&mut self, scalar: f32) {
         self.start = self.start.scale(scalar);
         self.end = self.end.scale(scalar);
-    }
-
-    fn set_size(&mut self, size: f32) {
-        self.width = size;
     }
 
     fn offset(&mut self, offset: [f32; 3]) {
@@ -422,19 +434,24 @@ struct TextElement {
     font: Font
 }
 
-impl Element for TextElement {
+impl DrawableElement for TextElement {
     fn update(&mut self, time_delta: Duration) {
         //do nothing
     }
 
-    fn render(&self, renderer: &Renderer, buffer: &mut [u32]){
+    fn render(&self, renderer: &Renderer, buffer: &mut [u32], depth_buffer: &mut Vec<f32>){
         let scale = i32::clamp(self.scale as i32, 1, i32::max_value());
         for character in 0..self.text.len() {
             let img = self.font.get_character(self.text.chars().nth(character).unwrap());
             if let Some(img) = img {
                 for x in 0..img.width() {
                     for y in 0..img.height() {
-                        let color = img.get_pixel(x, y).to_rgba();
+                        let mut color = img.get_pixel(x, y).to_rgba();
+                        /*
+                        for i in 0..3 {
+                            color.0[i] = (color.0[i] as f32 / 255.0 * self.color[i] as f32 / 255.0) as u8;
+                            println!("{}: {}, {}", i, color.0[i] , self.color[i] );
+                        }*/
                         for i in 0..scale{
                             for j in 0..scale {
                                 renderer.set_color_with_alpha(
@@ -458,16 +475,24 @@ impl Element for TextElement {
         }
     }
 
+    fn set_size(&mut self, size: f32) {
+        self.scale = size;
+    }
+
+    fn get_color(&self) -> [u8; 4] {
+        self.color
+    }
+
+    fn set_color(&mut self, color: [u8; 4]) {
+        self.color = color;
+    }
+
     fn transform_by(&mut self, matrix: Matrix3<f32>) {
         //self.position = self.position.mul(matrix);
     }
 
     fn scale_by(&mut self, scalar: f32) {
         self.scale = self.scale.mul(scalar);
-    }
-
-    fn set_size(&mut self, size: f32) {
-        self.scale = size;
     }
 
     fn offset(&mut self, offset: [f32; 3]) {
@@ -504,7 +529,7 @@ impl ParticleElement {
     }
 }
 
-impl Element for ParticleElement {
+impl DrawableElement for ParticleElement {
     fn update(&mut self, time_delta: Duration) {
         let mut new = self.clone();
         for animation in self.animations.iter_mut() {
@@ -514,9 +539,21 @@ impl Element for ParticleElement {
         *self = new;
     }
 
-    fn render(&self, renderer: &Renderer, buffer: &mut [u32]){
+    fn render(&self, renderer: &Renderer, buffer: &mut [u32], depth_buffer: &mut Vec<f32>){
         let pos = renderer.get_pixel_pos([self.position.x(), self.position.y()]);
-        renderer.draw_circle(buffer, (pos[0] as i32, pos[1] as i32), self.size * renderer.get_render_scale(), self.color)
+        renderer.draw_circle(buffer, depth_buffer, (pos[0] as i32, pos[1] as i32, self.get_depth()), self.size * renderer.get_render_scale(), self.color)
+    }
+
+    fn set_size(&mut self, size: f32) {
+        self.size = size;
+    }
+
+    fn get_color(&self) -> [u8; 4] {
+        self.color
+    }
+
+    fn set_color(&mut self, color: [u8; 4]) {
+        self.color = color;
     }
 
     fn transform_by(&mut self, matrix: Matrix3<f32>) {
@@ -525,10 +562,6 @@ impl Element for ParticleElement {
 
     fn scale_by(&mut self, scalar: f32) {
         self.position = self.position.scale(scalar);
-    }
-
-    fn set_size(&mut self, size: f32) {
-        self.size = size;
     }
 
     fn offset(&mut self, offset: [f32; 3]) {
@@ -543,10 +576,10 @@ impl Element for ParticleElement {
         self.position.z()
     }
 }
-trait ElementAnimation<T: Element>: DynClone{
+trait ElementAnimation<T: DrawableElement>: DynClone{
     fn update(&mut self, element: T, dt: Duration) -> T;
 }
-dyn_clone::clone_trait_object!(<T> ElementAnimation<T> where T: Element);
+dyn_clone::clone_trait_object!(<T> ElementAnimation<T> where T: DrawableElement);
 
 #[derive(Clone)]
 struct RotateYAnimation {
@@ -560,7 +593,7 @@ impl RotateYAnimation {
     }
 }
 
-impl<T: Element + DynClone + Clone> ElementAnimation<T> for RotateYAnimation {
+impl<T: DrawableElement + DynClone + Clone> ElementAnimation<T> for RotateYAnimation {
     fn update(&mut self, element: T, dt: Duration) -> T {
         let mut new = element.clone();
         new.transform_by(YAxisRotation::from(dt.as_secs_f32() * self.rate).get_rotation_matrix());
@@ -574,6 +607,7 @@ struct SnowAnimation {
     fall_speed: f32,
     velocity_noise: f32,
     bounds: [Vector3; 2],
+    opacity_falloff_distance: f32,
 }
 
 impl SnowAnimation {
@@ -583,11 +617,12 @@ impl SnowAnimation {
             velocity,
             velocity_noise,
             bounds,
+            opacity_falloff_distance: 1.0,
         }
     }
 }
 
-impl<T: Element + DynClone> ElementAnimation<T> for SnowAnimation {
+impl<T: DrawableElement + DynClone> ElementAnimation<T> for SnowAnimation {
     fn update(&mut self, element: T, dt: Duration) -> T {
         let mut bounds_dimensions = [0.0, 0.0, 0.0];
         for i in 0..3 {
@@ -600,13 +635,19 @@ impl<T: Element + DynClone> ElementAnimation<T> for SnowAnimation {
             self.velocity.set_x(f32::clamp(self.velocity.x() + (random::<f32>() - 0.5) * self.velocity_noise, -self.fall_speed, self.fall_speed));
             self.velocity.set_z(f32::clamp(self.velocity.z() + (random::<f32>() - 0.5) * self.velocity_noise, -self.fall_speed, self.fall_speed));
         }
+
         //println!("vel: [{}, {}, {}]", self.velocity.x(), self.velocity.y(), self.velocity.z());
+        let mut distance_to_border = self.opacity_falloff_distance;
 
         new.offset(self.velocity.scale(dt.as_secs_f32()).pos);
         for i in 0..3{
             let (lbound, hbound) =
                 (f32::min(self.bounds[0].pos[i], self.bounds[1].pos[i]),
                  f32::max(self.bounds[0].pos[i], self.bounds[1].pos[i]));
+
+            distance_to_border = f32::min(distance_to_border, f32::abs(hbound - new.get_pos().pos[i]));
+            distance_to_border = f32::min(distance_to_border, f32::abs(lbound - new.get_pos().pos[i]));
+
 
            if new.get_pos().pos[i] < lbound {
                let mut offset = [0.0, 0.0, 0.0];
@@ -618,26 +659,29 @@ impl<T: Element + DynClone> ElementAnimation<T> for SnowAnimation {
                new.offset(offset);
            }
         }
+        let mut new_color = new.get_color();
+        new_color[3] = (distance_to_border / self.opacity_falloff_distance * 255.0) as u8;
+        new.set_color(new_color);
         new
     }
 }
 
-struct ElementContainer {
-    transforms: HashMap<String, Box<dyn TransformMatrix>>,
+struct DrawableObject {
+    transforms: HashMap<u16, Box<dyn TransformMatrix>>,
     position: Box<dyn Position>,
-    elements: Vec<Box<dyn Element>>,
+    elements: Vec<Box<dyn DrawableElement>>,
 }
 
-impl ElementContainer {
-    fn empty() -> ElementContainer {
-        ElementContainer {
+impl DrawableObject {
+    fn empty() -> DrawableObject {
+        DrawableObject {
             transforms: HashMap::new(),
             position: Box::<Vector3>::new(Vector3::default()),
             elements: Vec::new()
         }
     }
-    fn get_transformed_elements(&self) -> Vec<Box<dyn Element>>{
-        let mut new_elements : Vec<Box<dyn Element>> = Vec::new();
+    fn get_transformed_elements(&self) -> Vec<Box<dyn DrawableElement>>{
+        let mut new_elements : Vec<Box<dyn DrawableElement>> = Vec::new();
         for element in self.elements.iter() {
             let mut new_element = element.clone();
             new_element.offset(self.position.get());
@@ -656,10 +700,10 @@ struct Renderer {
     width: usize,
     height: usize,
     scale: f32,
-    containers: HashMap<String, ElementContainer>,
+    objects: HashMap<String, DrawableObject>,
     rotation: f32,
     position_offset: [f32; 2],
-    transforms: HashMap<String, Box<dyn TransformMatrix>>,
+    transforms: HashMap<u16, Box<dyn TransformMatrix>>, //u16 is the id
 }
 
 impl Renderer{
@@ -668,7 +712,7 @@ impl Renderer{
             width,
             height,
             scale: 11.0,
-            containers: HashMap::new(),
+            objects: HashMap::new(),
             rotation: 0.0,
             position_offset: [0.0; 2],
             transforms: HashMap::new(),
@@ -677,19 +721,21 @@ impl Renderer{
 
     fn render (&self, buffer: &mut [u32]) {
         buffer.fill(0);
-        for container in self.containers.values() {
+        let mut depth_buffer: Vec<f32> = Vec::with_capacity(buffer.len());
+        depth_buffer.resize(buffer.len(), f32::INFINITY);
+        for container in self.objects.values() {
             for element in container.get_transformed_elements().iter() {
                 let mut element = element.clone();
-                for matrix in self.transforms.values() {
-                    element.transform_by(matrix.get_rotation_matrix())
+                for id in self.transforms.keys().sorted() {
+                    element.transform_by(self.transforms[id].get_rotation_matrix())
                 }
-                element.render(self, buffer);
+                element.render(self, buffer, &mut depth_buffer);
             }
         }
     }
 
     fn update (&mut self, time_delta: Duration) {
-        for container in self.containers.values_mut() {
+        for container in self.objects.values_mut() {
             for element in container.elements.iter_mut() {
                 element.update(time_delta);
             }
@@ -700,21 +746,42 @@ impl Renderer{
         self.scale * self.scale / 100.0
     }
 
-    fn draw_line (&self, buffer: &mut [u32], (x_start, y_start): (f32, f32), (x_end, y_end): (f32, f32), color: [u8; 4]) {
+    fn get_depth_at(&self, depth_buffer: &Vec<f32>,  pos: [i32; 2]) -> f32 {
+        if pos[0] > 0 && pos[0] < self.width as i32 && pos[1] > 0 && pos[1] < self.height as i32{
+            return depth_buffer[(pos[0] + pos[1] * self.width as i32) as usize]
+        }
+        f32::INFINITY
+    }
+
+    fn set_depth_at(&self, depth_buffer: &mut Vec<f32>, pos: [i32; 2], value: f32) {
+        if pos[0] > 0 && pos[0] < self.width as i32 && pos[1] > 0 && pos[1] < self.height as i32{
+            //println!("x: {}, y: {}, width: {}, index: {}", pos[0], pos[1], self.width, (pos[0] + (pos[1] * self.width as i32)) as usize);
+            depth_buffer[(pos[0] + pos[1] * self.width as i32) as usize] = value
+        }
+    }
+
+    fn draw_line (&self, buffer: &mut [u32], depth_buffer: &mut Vec<f32>, (x_start, y_start, start_depth): (f32, f32, f32), (x_end, y_end, end_depth): (f32, f32, f32), color: [u8; 4]) {
 //stolen from wikipedia
         let (mut x, mut y) = (x_start, y_start);
         let dx = f32::abs(f32::clamp((x_end - x) / (y_end - y), -1.0, 1.0)) * if x_start > x_end {-1.0} else {1.0};
         let dy = f32::abs(f32::clamp((y_end - y) / (x_end - x), -1.0, 1.0)) * if y_start > y_end {-1.0} else {1.0};
 
         let mut iters = 0;
+        let mut progress = 0.0;
 
-        while f32::max(f32::abs(x - x_start), f32::abs(y - y_start)) < f32::max(f32::abs(y_start - y_end), f32::abs(x_start - x_end)) {
-            self.set_color_with_alpha(buffer, (x as i32, y as i32), color);
+        while progress <= 1.0 {
+            progress = f32::max(f32::abs(x - x_start), f32::abs(y - y_start)) / f32::max(f32::abs(y_start - y_end), f32::abs(x_start - x_end));
+            //println!("progress: {}", progress);
+            let depth = start_depth * (1.0 - progress) + end_depth * progress;
+            if depth < self.get_depth_at(depth_buffer, [x as i32, y as i32]) {
+                self.set_depth_at(depth_buffer, [x as i32, y as i32], depth);
+                self.set_color_with_alpha(buffer, (x as i32, y as i32), color);
+            }
             iters += 1;
 
             if iters > 10000 {
                 println!("WARN: Too many line draw iterations. Aborting. (start: ({}, {}), end: ({}, {}), delta x: {}, delta y: {})", x_start, y_start, x_end, y_end, dx, dy);
-                return()
+                return ()
             }
 
             //x += if right {1.0} else {-1.0};
@@ -723,11 +790,19 @@ impl Renderer{
         }
     }
 
-    fn draw_circle(&self, buffer: &mut [u32], (x, y): (i32, i32), radius: f32, color: [u8; 4]) {
+    fn draw_circle(&self, buffer: &mut [u32], depth_buffer: &mut Vec<f32>, (x, y, depth): (i32, i32, f32), radius: f32, color: [u8; 4]) {
+        //check if the circle is on the screen
+        if x as f32 + radius < 0.0 || y as f32 + radius < 0.0 || x as f32 - radius > self.width as f32  || y as f32 - radius > self.height as f32 {
+            return;
+        }
         for i in (-radius.floor() as i32)..(radius.ceil() as i32) {
             for j in (-radius.floor() as i32)..(radius.ceil() as i32) {
+                //println!("i: {}, j: {}", i, j);
                 if ((i * i + j * j) as f32) < radius * radius {
-                    self.set_color_with_alpha(buffer, (x + i, y  + j), color);
+                    if depth < self.get_depth_at(depth_buffer, [x + i, y +j]) {
+                        self.set_depth_at(depth_buffer, [x + i, y + j], depth);
+                        self.set_color_with_alpha(buffer, (x + i, y + j), color);
+                    }
                 }
             }
         }
@@ -777,7 +852,14 @@ fn main() {
 
     let font = image::load_from_memory(font_bytes).unwrap().to_rgba8();
 
-    //vertices
+    renderer.objects.insert("tree".to_string(), DrawableObject::empty());
+    renderer.objects.insert("text".to_string(), DrawableObject::empty());
+    renderer.objects.insert("snow".to_string(), DrawableObject::empty());
+
+    //TREE
+    renderer.objects.get_mut("tree").unwrap().position = Box::<Vector3>::new(Vector3::new([0.0, -2.0, 0.0]));
+    //renderer.containers.get_mut("tree").unwrap().position = Box::<Vector3>::new(Vector3::new([0.0, -1.2, 0.0]));
+
     let mut verts = [
         [0.0,	    0.0,	 1.0],
         [-0.866,    0.0,	 0.5],
@@ -793,39 +875,95 @@ fn main() {
         [0.346,	    0.8,	 0.2],
     ];
 
-    renderer.containers.insert("tree".to_string(), ElementContainer::empty());
     let line_color = [0, 255, 0, 255];
-    let scale_offset = 0.8;
+    let scale_offset: f32 = 0.8;
     let pos_offset = 0.8;
+    let mut ornament_x = 0.6;
+    let mut ornament_x_bottom = 0.2;
+    let mut ornament_y = 0.0;
+    let ornament_colors = [
+        [255, 0, 0, 255],
+        //[0, 150, 0, 255],
+        [0, 0, 150, 255],
+    ];
 
-    for _ in 0..20 {
+    let spawn_ornaments = false;
+
+    for segment in 0..20 {
         for i in 0..6 {
+            /*
+            let starting_vel = [1.0, 1.6];
+            let box_size = 10.0;
+
+            let vel = [starting_vel[0] + random::<f32>() * 0.5, 0.0, starting_vel[1] + random::<f32>() * 0.5];
+            let animation: Vec<Box<dyn ElementAnimation<Line>>> = vec![Box::new(SnowAnimation::new(
+                2.0,
+                Vector3::from(Position::new(vel)),
+                0.0,
+                [Position::new([-box_size, -box_size, -box_size]), Position::new([box_size, box_size, box_size])],
+            ))];
+            */
             let animation: Vec<Box<dyn ElementAnimation<Line>>> = vec![Box::new(RotateYAnimation::new(30.0))];
-            renderer.containers.get_mut("tree").unwrap().elements.push(Box::new(Line::new(
+            renderer.objects.get_mut("tree").unwrap().elements.push(Box::new(Line::new(
                 Vector3 { pos: verts[i]},
                 Vector3 { pos:  verts[(i + 1) % 6]},
                 line_color,
                 animation.clone(),
             )));
 
-            renderer.containers.get_mut("tree").unwrap().elements.push(Box::new(Line::new(
+            renderer.objects.get_mut("tree").unwrap().elements.push(Box::new(Line::new(
                 Vector3 { pos: verts[i]},
                 Vector3 { pos:  verts[i + 6]},
                 line_color,
                 animation.clone(),
             )));
 
-            renderer.containers.get_mut("tree").unwrap().elements.push(Box::new(Line::new(
+            renderer.objects.get_mut("tree").unwrap().elements.push(Box::new(Line::new(
                 Vector3 { pos: verts[i + 6]},
                 Vector3 { pos:  verts[((i + 1) % 6) + 6]},
                 line_color,
                 animation.clone(),
             )));
+
+            if (spawn_ornaments) {
+                let ornament_fac = scale_offset.powi(segment);
+                for i in 0..(random::<f32>() * 4.0) as i32 {
+                    let h = random::<f32>();
+                    let rot = random::<f32>() * 3.14 * 2.0;
+                    let distance = ornament_x + (1.0 - h) * ornament_x_bottom;
+                    let pos = [
+                        f32::sin(rot) * distance,
+                        h * pos_offset * ornament_fac + ornament_y,
+                        f32::cos(rot) * distance,
+                    ];
+                    let ornament_anim: Vec<Box<dyn ElementAnimation<ParticleElement>>> = vec![Box::new(RotateYAnimation::new((random::<f32>() - 0.5) * 120.0))];
+
+                    renderer.objects.get_mut("tree").unwrap().elements.push(Box::new(ParticleElement::new(
+                        Position::new(pos),
+                        10.0 * ornament_fac,
+                        ornament_colors.choose(&mut rand::rng()).unwrap().clone(),
+                        ornament_anim,
+                    )));
+                }
+            }
         }
         for i in 0..verts.len() {
-            verts[i] = [verts[i][0] * scale_offset, verts[i][1] * scale_offset + pos_offset, verts[i][2] * scale_offset]
+            verts[i] = [verts[i][0] * scale_offset, verts[i][1] * scale_offset + pos_offset, verts[i][2] * scale_offset];
         }
+        ornament_x *= scale_offset;
+        ornament_x_bottom *= scale_offset;
+        ornament_y = ornament_y * scale_offset + pos_offset;
+        println!("x: {}, bx: {}, y: {} [done]", ornament_x, ornament_x_bottom, ornament_y);
     }
+
+    //star
+    renderer.objects.get_mut("tree").unwrap().elements.push(Box::new(ParticleElement::new(
+        Position::new([0.0, 4.0, 0.0]),
+        10.0,
+        [200, 255, 0, 255],
+        vec![],
+    )));
+
     //floor
     /*
     renderer.containers.get_mut("tree").unwrap().elements.push(Box::new(Line { start: RelativePosition { pos: [-2.0, 0.0, -2.0]}, end: RelativePosition { pos:  [-2.0, 0.0,  2.0]}, color: line_color}));
@@ -833,32 +971,28 @@ fn main() {
     renderer.containers.get_mut("tree").unwrap().elements.push(Box::new(Line { start: RelativePosition { pos: [ 2.0, 0.0,  2.0]}, end: RelativePosition { pos:  [-2.0, 0.0,  2.0]}, color: line_color}));
     renderer.containers.get_mut("tree").unwrap().elements.push(Box::new(Line { start: RelativePosition { pos: [ 2.0, 0.0, -2.0]}, end: RelativePosition { pos:  [-2.0, 0.0, -2.0]}, color: line_color}));
     */
-    renderer.containers.get_mut("tree").unwrap().position = Box::<Vector3>::new(Vector3::new([0.0, -2.0, 0.0]));
-    //renderer.containers.get_mut("tree").unwrap().position = Box::<Vector3>::new(Vector3::new([0.0, -1.2, 0.0]));
 
-    renderer.containers.insert("text".to_string(), ElementContainer::empty());
+    //TEXT
     let text = Box::new(TextElement {
         position: ScreenPosition {
             pos: [0.0, 20.0],
             z: 0.0,
         },
-        text: "Merry Christmas".to_string(),
+        text: "Merry Crimas".to_string(),
         scale: 2.0,
-        color: [255, 255, 255, 255],
+        color: [255, 0, 0, 255],
         font: Font {
             font_image: font,
             width: 32,
             has_uppercase: false,
         }
     });
-    renderer.containers.get_mut("text").unwrap().elements.push(text);
+    renderer.objects.get_mut("text").unwrap().elements.push(text);
 
-    renderer.containers.insert("snow".to_string(), ElementContainer::empty());
-
+    //SNOW
     let starting_vel = [1.0, 1.6];
     let box_size = 10.0;
-
-    for i in 0..500 {
+    for i in 0..2500 {
         let vel = [starting_vel[0] + random::<f32>() * 0.5, 0.0, starting_vel[1] + random::<f32>() * 0.5];
         let animation = Box::new(SnowAnimation::new(
             2.0,
@@ -871,46 +1005,17 @@ fn main() {
             (random::<f32>() - 0.5) * box_size * 2.0,
             (random::<f32>() - 0.5) * box_size * 2.0,
         ];
-        renderer.containers.get_mut("tree").unwrap().elements.push(Box::new(ParticleElement::new(
+        renderer.objects.get_mut("tree").unwrap().elements.push(Box::new(ParticleElement::new(
             Vector3 { pos },
             4.0,
             [255, 255, 255, 255],
+            //vec![animation, Box::new(RotateYAnimation::new(360.0))],
             vec![animation],
         )));
     }
 
-    /*
-    renderer.containers.get_mut("tree").unwrap().elements.push(Box::new(ParticleElement::new(
-        Vector3 { pos: [1.0, 1.0, 0.0] },
-        10.0,
-        [255, 0, 0, 255],
-        vec![animation.clone()],
-    )));
-
-    renderer.containers.get_mut("tree").unwrap().elements.push(Box::new(ParticleElement::new(
-        Vector3 { pos: [-1.0, 1.0, 0.0] },
-        10.0,
-        [255, 0, 0, 255],
-        vec![animation.clone()],
-    )));
-
-    renderer.containers.get_mut("tree").unwrap().elements.push(Box::new(ParticleElement::new(
-        Vector3 { pos: [0.0, 1.0, 1.0] },
-        10.0,
-        [0, 0, 255, 255],
-        vec![animation.clone()],
-    )));
-
-    renderer.containers.get_mut("tree").unwrap().elements.push(Box::new(ParticleElement::new(
-        Vector3 { pos: [0.0, 1.0, -1.0] },
-        10.0,
-        [0, 0, 255, 255],
-        vec![animation.clone()]
-    )));
-     */
-
-    renderer.transforms.insert("y_flip".to_string(), Box::new(ScaleTransform::from([1.0, -1.0, 1.0])));
-    renderer.transforms.insert("x_rot_bias".to_string(), Box::new(XAxisRotation::from(15.0)));
+    renderer.transforms.insert(0, Box::new(ScaleTransform::from([1.0, -1.0, 1.0])));
+    renderer.transforms.insert(10, Box::new(XAxisRotation::from(15.0)));
     //renderer.transforms.insert("view_y_rot".to_string(), Box::new(XAxisRotation::from(15.0)));
     //renderer.transforms.insert("view_x_rot".to_string(), Box::new(XAxisRotation::from(15.0)));
 
@@ -966,8 +1071,8 @@ fn main() {
                             let yrot = (position.x as f32 - renderer.width as f32 / 2.0) / 10.0;
 
                             //println!("x: {}, t: {}", xrot, yrot);
-                            renderer.transforms.insert("view_x_rot".parse().unwrap(), Box::new(XAxisRotation::from(xrot)));
-                            renderer.transforms.insert("view_y_rot".parse().unwrap(), Box::new(YAxisRotation::from (yrot)));
+                            renderer.transforms.insert(20, Box::new(YAxisRotation::from(-yrot)));
+                            renderer.transforms.insert(21, Box::new(XAxisRotation::from(xrot)));
                             //println!("x: {}, t: {}", xrot, yrot);
                             //renderer.transforms.insert("view_x_rot".parse().unwrap(), Box::new(YAxisRotation {angle: 0.0}));
                         }
@@ -987,7 +1092,7 @@ fn main() {
                             renderer.width = width as usize;
                             renderer.height = height as usize;
 
-                            for element in renderer.containers.get_mut("text").unwrap().elements.iter_mut() {
+                            for element in renderer.objects.get_mut("text").unwrap().elements.iter_mut() {
                                 element.set_size(renderer.width as f32 / 500.0);
                             }
 
