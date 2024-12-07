@@ -4,15 +4,32 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::ops::{Deref, Mul};
 use std::rc::Rc;
-use std::time::{Duration, Instant};
-use winit::event::{Event, MouseScrollDelta, StartCause, WindowEvent};
+use winit::event::{ElementState, Event, KeyEvent, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::WindowBuilder;
+use winit::window::{Fullscreen, Window, WindowAttributes, WindowBuilder};
 use dyn_clone::DynClone;
 use image::{GenericImage, Pixel, RgbaImage};
 use rand::random;
 use itertools::Itertools;
-use rand::seq::IndexedRandom;
+use rand::seq::{SliceRandom};
+use winit::dpi::{LogicalSize, PhysicalSize};
+use winit::keyboard::{Key, NamedKey, SmolStr};
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Duration, Instant};
+#[cfg(target_arch = "wasm32")]
+use web_time::{Duration, Instant};
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::__rt::Start;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use web_sys::{HtmlCanvasElement};
+#[cfg(target_arch = "wasm32")]
+use winit::platform::web::WindowBuilderExtWebSys;
+#[cfg(target_arch = "wasm32")]
+use winit::platform::web::WindowExtWebSys;
 
 #[path = "utils/winit_app.rs"]
 mod winit_app;
@@ -105,7 +122,7 @@ impl Position for ScreenPosition {
         &mut self.pos[1]
     }
     fn z_mut(&mut self) -> &mut f32 {
-        &mut self.pos[2]
+        &mut self.z
     }
 
     fn set_x(&mut self, x: f32) {
@@ -435,12 +452,12 @@ struct TextElement {
 }
 
 impl DrawableElement for TextElement {
-    fn update(&mut self, time_delta: Duration) {
+    fn update(&mut self, _time_delta: Duration) {
         //do nothing
     }
 
     fn render(&self, renderer: &Renderer, buffer: &mut [u32], depth_buffer: &mut Vec<f32>){
-        let scale = i32::clamp(self.scale as i32, 1, i32::max_value());
+        let scale = i32::clamp(self.scale as i32, 1, i32::MAX);
         for character in 0..self.text.len() {
             let img = self.font.get_character(self.text.chars().nth(character).unwrap());
             if let Some(img) = img {
@@ -454,19 +471,20 @@ impl DrawableElement for TextElement {
                         }*/
                         for i in 0..scale{
                             for j in 0..scale {
-                                renderer.set_color_with_alpha(
-                                    buffer,
-                                    (x as i32 * scale
-                                         + character as i32 * img.height() as i32 * scale
-                                         + self.position.get()[0] as i32
-                                         - self.text.len() as i32 * self.font.width as i32 / 2 * scale
-                                         + renderer.width as i32 / 2
-                                         + i,
-                                     y as i32 * scale
-                                         + self.position.get()[1] as i32
-                                         + j),
-                                    color.0
-                                )
+                                let nx: i32 = x as i32 * scale
+                                    + character as i32 * img.height() as i32 * scale
+                                    + self.position.get()[0] as i32
+                                    - self.text.len() as i32 * self.font.width as i32 / 2 * scale
+                                    + renderer.width as i32 / 2
+                                    + i;
+                                let ny: i32 = y as i32 * scale
+                                    + self.position.get()[1] as i32
+                                    + j;
+
+                                if self.get_depth() < renderer.get_depth_at(depth_buffer, [nx, ny]) {
+                                    renderer.set_depth_at(depth_buffer, [nx, ny], self.get_depth());
+                                    renderer.set_color_with_alpha(buffer, (nx, ny), color.0);
+                                }
                             }
                         }
                     }
@@ -684,10 +702,10 @@ impl DrawableObject {
         let mut new_elements : Vec<Box<dyn DrawableElement>> = Vec::new();
         for element in self.elements.iter() {
             let mut new_element = element.clone();
-            new_element.offset(self.position.get());
             for matrix in self.transforms.values() {
                 new_element.transform_by(matrix.get_rotation_matrix())
             }
+            new_element.offset(self.position.get());
             new_elements.push(new_element);
         }
         new_elements
@@ -711,7 +729,7 @@ impl Renderer{
         Renderer {
             width,
             height,
-            scale: 11.0,
+            scale: 12.0,
             objects: HashMap::new(),
             rotation: 0.0,
             position_offset: [0.0; 2],
@@ -721,7 +739,7 @@ impl Renderer{
 
     fn render (&self, buffer: &mut [u32]) {
         buffer.fill(0);
-        let mut depth_buffer: Vec<f32> = Vec::with_capacity(buffer.len());
+        let mut depth_buffer: Vec<f32> = Vec::with_capacity(self.width * self.height);
         depth_buffer.resize(buffer.len(), f32::INFINITY);
         for container in self.objects.values() {
             for element in container.get_transformed_elements().iter() {
@@ -743,7 +761,7 @@ impl Renderer{
     }
 
     fn get_render_scale (&self) -> f32 {
-        self.scale * self.scale / 100.0
+        self.scale * self.scale / 100.0 * self.height as f32 / 1080.0
     }
 
     fn get_depth_at(&self, depth_buffer: &Vec<f32>,  pos: [i32; 2]) -> f32 {
@@ -809,7 +827,11 @@ impl Renderer{
     }
 
     fn get_pixel_pos(&self, pos: [f32; 2]) -> [f32; 2] {
-        [(self.width / 2) as f32 + (pos[0] * self.get_render_scale() * 100.0) + self.position_offset[0], (self.height / 2) as f32 + (pos[1] * self.get_render_scale() * 100.0) + self.position_offset[1]]
+        [
+            //TODO: clean this mess up
+            (self.width / 2) as f32 + (pos[0] * self.get_render_scale() / self.width as f32 * 1080.0 * self.width as f32 / 10.0) + self.position_offset[0],
+            (self.height / 2) as f32 + (pos[1] * self.get_render_scale() / self.height as f32 * 1080.0 * self.height as f32 / 10.0) + self.position_offset[1]
+        ]
     }
 
     fn set_color_with_alpha (&self, buffer: &mut [u32], (x, y): (i32, i32), color: [u8; 4]) {
@@ -838,15 +860,59 @@ impl Renderer{
     }
 }
 
-fn main() {
+
+#[cfg(not(target_arch = "wasm32"))]
+fn setup_window (event_loop: &EventLoop<()>) -> Rc<Window> {
+    let window = Rc::new(WindowBuilder::new().build(&event_loop).unwrap());
+    //window.set_min_inner_size(Some(LogicalSize::new(600.0, 400.0)));
+    window
+}
+
+#[cfg(target_arch = "wasm32")]
+fn setup_window (event_loop: &EventLoop<()>) -> Rc<Window> {
+
+    let window = web_sys::window().expect("no global `window` exists");
+    let document = window.document().expect("should have a document on window");
+    let body = document.body().expect("document should have a body");
+
+
+    let canvas = document.create_element("canvas").unwrap();
+    let canvas: HtmlCanvasElement = canvas
+        .dyn_into::<HtmlCanvasElement>()
+        .map_err(|_| ())
+        .unwrap();
+    canvas.set_attribute("id", "canvas").unwrap();
+    canvas.set_width(window.inner_width().unwrap().as_f64().unwrap() as u32);
+    canvas.set_height(window.inner_height().unwrap().as_f64().unwrap() as u32);
+
+    body.append_child(&canvas).unwrap();
+
+    let context = canvas
+        .get_context("2d")
+        .unwrap()
+        .unwrap()
+        .dyn_into::<web_sys::CanvasRenderingContext2d>()
+        .unwrap();
+    context.scale(window.device_pixel_ratio(), window.device_pixel_ratio()).unwrap();
+
+    let winit_window = Rc::new(
+        WindowBuilder::new()
+            .with_canvas(Some(canvas))
+        .build(&event_loop).unwrap());
+    // let _ = winit_window.request_inner_size(LogicalSize::new(800.0, 800.0));
+    winit_window
+}
+
+pub fn main() {
     let event_loop = EventLoop::new().unwrap();
 
-    let window = Rc::new(WindowBuilder::new().build(&event_loop).unwrap());
+    let window = setup_window(&event_loop);
+
     let context = softbuffer::Context::new(window.clone()).unwrap();
     let mut surface = softbuffer::Surface::new(&context, window.clone()).unwrap();
 
     let mut renderer = Renderer::new(window.inner_size().width as usize, window.inner_size().height as usize);
-    let mut lastRender = Instant::now();
+    let mut last_render = Instant::now();
 
     let font_bytes = include_bytes!("resources/font.png");
 
@@ -889,7 +955,7 @@ fn main() {
 
     let spawn_ornaments = false;
 
-    for segment in 0..20 {
+    for segment in 0..17 {
         for i in 0..6 {
             /*
             let starting_vel = [1.0, 1.6];
@@ -925,9 +991,9 @@ fn main() {
                 animation.clone(),
             )));
 
-            if (spawn_ornaments) {
+            if spawn_ornaments {
                 let ornament_fac = scale_offset.powi(segment);
-                for i in 0..(random::<f32>() * 4.0) as i32 {
+                for _i in 0..(random::<f32>() * 4.0) as i32 {
                     let h = random::<f32>();
                     let rot = random::<f32>() * 3.14 * 2.0;
                     let distance = ornament_x + (1.0 - h) * ornament_x_bottom;
@@ -941,7 +1007,7 @@ fn main() {
                     renderer.objects.get_mut("tree").unwrap().elements.push(Box::new(ParticleElement::new(
                         Position::new(pos),
                         10.0 * ornament_fac,
-                        ornament_colors.choose(&mut rand::rng()).unwrap().clone(),
+                        ornament_colors.choose(&mut rand::thread_rng()).unwrap().clone(),
                         ornament_anim,
                     )));
                 }
@@ -953,14 +1019,14 @@ fn main() {
         ornament_x *= scale_offset;
         ornament_x_bottom *= scale_offset;
         ornament_y = ornament_y * scale_offset + pos_offset;
-        println!("x: {}, bx: {}, y: {} [done]", ornament_x, ornament_x_bottom, ornament_y);
+        //println!("x: {}, bx: {}, y: {} [done]", ornament_x, ornament_x_bottom, ornament_y);
     }
 
     //star
     renderer.objects.get_mut("tree").unwrap().elements.push(Box::new(ParticleElement::new(
         Position::new([0.0, 4.0, 0.0]),
         10.0,
-        [200, 255, 0, 255],
+        [255, 255, 0, 255],
         vec![],
     )));
 
@@ -976,7 +1042,7 @@ fn main() {
     let text = Box::new(TextElement {
         position: ScreenPosition {
             pos: [0.0, 20.0],
-            z: 0.0,
+            z: 1000.0,// render behind stuff
         },
         text: "Merry Crimas".to_string(),
         scale: 2.0,
@@ -991,8 +1057,8 @@ fn main() {
 
     //SNOW
     let starting_vel = [1.0, 1.6];
-    let box_size = 10.0;
-    for i in 0..2500 {
+    let box_size = 12.0;
+    for _i in 0..(if cfg!(target_arch = "wasm32") {500} else { 2500 }){
         let vel = [starting_vel[0] + random::<f32>() * 0.5, 0.0, starting_vel[1] + random::<f32>() * 0.5];
         let animation = Box::new(SnowAnimation::new(
             2.0,
@@ -1038,9 +1104,7 @@ fn main() {
     renderer.lines.lines.push(Line::new([ 5.0, -5.0,  5.0], [ 5.0,  5.0,  5.0], [0, 255, 0, 255]));
      */
 
-    event_loop.set_control_flow(ControlFlow::WaitUntil(
-        Instant::now().checked_add(Duration::from_millis(1000/60)).unwrap(),
-    ));
+    event_loop.set_control_flow(ControlFlow::Poll);
 
     let _ = event_loop.run(move |event, elwt| {
         //renderer.lines.lines.push(Line::new([-5.0, -5.0, -5.0], [5.0, 5.0, -5.0]));
@@ -1060,21 +1124,45 @@ fn main() {
                                     renderer.scale += dy;
                                 }
                                 MouseScrollDelta::PixelDelta(delta) => {
-                                    renderer.scale += delta.y as f32 / 5.0;
+                                    //println!("delta: {}, {}", delta.x, delta.y);
+
+                                   if cfg!(target_arch = "wasm32") {
+                                       renderer.scale += f32::clamp(delta.y as f32 / 15.0, -1.0, 1.0); //clamps because if scrolling with a mouse the value would be wayyy to high
+                                   } else {
+                                       renderer.scale += delta.y as f32 / 5.0
+                                   };
 
                                 }
                             }
                             renderer.scale = renderer.scale.clamp(8.0, 25.0);
                         }
                         WindowEvent::CursorMoved { position, .. } => {
-                            let xrot = (position.y as f32 - renderer.height as f32 / 2.0) / 10.0;
-                            let yrot = (position.x as f32 - renderer.width as f32 / 2.0) / 10.0;
+                            let xrot = (position.y as f32 - window.inner_size().height as f32 / 2.0) / window.inner_size().height as f32 * 100.0;
+                            let yrot = (position.x as f32 - window.inner_size().width as f32 / 2.0) / window.inner_size().width as f32 * 100.0;
 
-                            //println!("x: {}, t: {}", xrot, yrot);
                             renderer.transforms.insert(20, Box::new(YAxisRotation::from(-yrot)));
                             renderer.transforms.insert(21, Box::new(XAxisRotation::from(xrot)));
-                            //println!("x: {}, t: {}", xrot, yrot);
-                            //renderer.transforms.insert("view_x_rot".parse().unwrap(), Box::new(YAxisRotation {angle: 0.0}));
+                        }
+                        WindowEvent::KeyboardInput {  event, ..} => {
+                            match event.state {
+                                ElementState::Pressed => {
+                                    match event.logical_key {
+                                        Key::Named(NamedKey::Escape) => {
+                                            window.set_fullscreen(None);
+                                        }
+                                        Key::Named(NamedKey::F11) => {
+                                            window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+                                        }
+                                        Key::Character(char) => {
+                                            if char == "f" {
+                                                window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                         WindowEvent::RedrawRequested => {
                             let (width, height) = {
@@ -1089,6 +1177,13 @@ fn main() {
                                 .unwrap();
 
                             let mut buffer = surface.buffer_mut().unwrap();
+                            #[cfg(target_arch = "wasm32")]
+                            if cfg!(target_arch = "wasm32"){
+                                let web_window = web_sys::window().expect("no global `window` exists");
+                                let (w, h) = (web_window.inner_width().unwrap().as_f64().unwrap() * web_window.device_pixel_ratio(), web_window.inner_height().unwrap().as_f64().unwrap() * web_window.device_pixel_ratio());
+                                let _ = window.request_inner_size(PhysicalSize::new(w, h));
+                            }
+
                             renderer.width = width as usize;
                             renderer.height = height as usize;
 
@@ -1096,8 +1191,8 @@ fn main() {
                                 element.set_size(renderer.width as f32 / 500.0);
                             }
 
-                            renderer.update(Instant::now().duration_since(lastRender));
-                            lastRender = Instant::now();
+                            renderer.update(Instant::now().duration_since(last_render));
+                            last_render = Instant::now();
 
                             renderer.render(&mut buffer);
                             //renderer.draw_circle(&mut buffer, (50, 50), 10.0, [255, 255, 255, 255]);
@@ -1115,14 +1210,12 @@ fn main() {
             }
             Event::NewEvents(cause) => {
                 match cause {
-                    StartCause::ResumeTimeReached { .. } => {
-                        elwt.set_control_flow(ControlFlow::WaitUntil(
-                            Instant::now().checked_add(Duration::from_millis(1000/60)).unwrap(),
-                        ));
-                        renderer.rotation += 1.0;
-                        //renderer.containers.get_mut("tree").unwrap().y_rot_matrix = get_y_rotation_matrix(renderer.rotation);
+                    StartCause::Poll { .. } => {
+                        if Instant::now().duration_since(last_render) > Duration::from_secs_f64(1.0 / 60.0) {
+                            renderer.rotation += 1.0;
 
-                        window.request_redraw();
+                            window.request_redraw();
+                        }
                     }
                     _ => {}
                 }
