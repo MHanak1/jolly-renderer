@@ -20,12 +20,34 @@ js-sys = "0.3.68"
 console_log = "1.0.0"
 console_error_panic_hook = "0.1.7"
 log = "0.4.22"
-web-time = "1"
+web-time = "0.2"
 getrandom = { version =  "0.2.15", features = ["js"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies.web-sys]
 version = "0.3.5"
-features = ['Document', 'Element', 'HtmlElement', 'Node', 'Window', 'HtmlCanvasElement', 'EventListener']
+features = [
+    'Document',
+    'Element',
+    'HtmlElement',
+    'Node',
+    'Window',
+    'HtmlCanvasElement',
+    'EventListener',
+    'CssStyleDeclaration',
+    'AnimationEvent',
+]
+
+[profile.release]
+#codegen-units = 1
+#lto = "fat"
+debug = 1
+debuginfo-level = 1
+
+[build]
+rustflags = ["-C", "symbol-mangling-version=v0"]
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ['-O4', '-g'] #symbols for profiling and debugging of the WASM
 
 #[target.'cfg(target_family = "wasm")']
 #rustflags = ["--cfg=web_sys_unstable_apis"]

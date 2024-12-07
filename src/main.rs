@@ -2,18 +2,18 @@
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
-use std::ops::{Deref, Mul};
+use std::ops::{Add, Mul};
 use std::rc::Rc;
-use winit::event::{ElementState, Event, KeyEvent, MouseScrollDelta, StartCause, WindowEvent};
+use std::thread;
+use winit::event::{ElementState, Event, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::{Fullscreen, Window, WindowAttributes, WindowBuilder};
+use winit::window::{Fullscreen, Window, WindowBuilder};
 use dyn_clone::DynClone;
 use image::{GenericImage, Pixel, RgbaImage};
 use rand::random;
 use itertools::Itertools;
 use rand::seq::{SliceRandom};
-use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::keyboard::{Key, NamedKey, SmolStr};
+use winit::keyboard::{Key, NamedKey};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
@@ -26,6 +26,10 @@ use wasm_bindgen::__rt::Start;
 use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use web_sys::{HtmlCanvasElement};
+#[cfg(target_arch = "wasm32")]
+use winit::dpi::PhysicalSize;
+#[cfg(target_arch = "wasm32")]
+use winit::platform::web::{EventLoopWindowTargetExtWebSys, PollStrategy};
 #[cfg(target_arch = "wasm32")]
 use winit::platform::web::WindowBuilderExtWebSys;
 #[cfg(target_arch = "wasm32")]
@@ -217,8 +221,8 @@ impl Transformable for Vector3 {
 
     fn offset(&self, offset: [f32; 3]) -> Vector3 {
         let mut new_pos = self.clone();
-        for i in 0..3 {
-            new_pos.pos[i] = self.pos[i] + offset[i];
+        for (i, offset) in offset.iter().enumerate() {
+            new_pos.pos[i] = self.pos[i] + offset;
         }
         new_pos
     }
@@ -246,7 +250,7 @@ struct ScaleTransform {
 
 impl TransformMatrix for XAxisRotation {
     fn get_rotation_matrix(&self) -> Matrix3<f32> {
-        let rad = self.angle / 180.0 * 3.14;
+        let rad = self.angle / 180.0 * std::f32::consts::PI;
         Matrix3 {
             mat: [[1.0, 0.0, 0.0],
                 [0.0, f32::cos(rad), -f32::sin(rad)],
@@ -257,7 +261,7 @@ impl TransformMatrix for XAxisRotation {
 
 impl TransformMatrix for YAxisRotation {
     fn get_rotation_matrix(&self) -> Matrix3<f32> {
-        let rad = self.angle / 180.0 * 3.14;
+        let rad = self.angle / 180.0 * std::f32::consts::PI;
         Matrix3 {
             mat:[
                 [f32::cos(rad), 0.0, f32::sin(rad)],
@@ -270,7 +274,7 @@ impl TransformMatrix for YAxisRotation {
 
 impl TransformMatrix for ZAxisRotation {
     fn get_rotation_matrix(&self) -> Matrix3<f32> {
-        let rad = self.angle / 180.0 * 3.14;
+        let rad = self.angle / 180.0 * std::f32::consts::PI;
         Matrix3 {
             mat:[
                 [f32::cos(rad), -f32::sin(rad), 0.0],
@@ -338,10 +342,10 @@ impl Font {
             return None;
         }
         if character > 'Z' {
-            char_index = char_index - 6;
+            char_index -= 6;
         }
         if !self.has_uppercase {
-            char_index = char_index % 26;
+            char_index %= 26;
         }
         Some(RgbaImage::from(
             self.font_image.clone().sub_image(
@@ -356,7 +360,7 @@ impl Font {
 
 trait DrawableElement: DynClone {
     fn update(&mut self, dt: Duration);
-    fn render(&self, renderer: &Renderer, buffer: &mut [u32], depth_buffer: &mut Vec<f32>);
+    fn render(&self, renderer: &Renderer, buffer: &mut [u32], depth_buffer: &mut [f32]);
     fn set_size(&mut self, size: f32);
     fn get_color(&self) -> [u8; 4];
     fn set_color(&mut self, color: [u8; 4]);
@@ -400,7 +404,7 @@ impl DrawableElement for Line {
         *self = new;
     }
 
-    fn render(&self, renderer: &Renderer, buffer: &mut [u32], depth_buffer: &mut Vec<f32>) {
+    fn render(&self, renderer: &Renderer, buffer: &mut [u32], depth_buffer: &mut [f32]) {
         let line_start = renderer.get_pixel_pos([self.start.x(), self.start.y()]);
         let line_end = renderer.get_pixel_pos([self.end.x(), self.end.y()]);
         renderer.draw_line(buffer, depth_buffer, (line_start[0], line_start[1], self.start.z()), (line_end[0], line_end[1], self.end.z()), self.color);
@@ -456,14 +460,14 @@ impl DrawableElement for TextElement {
         //do nothing
     }
 
-    fn render(&self, renderer: &Renderer, buffer: &mut [u32], depth_buffer: &mut Vec<f32>){
+    fn render(&self, renderer: &Renderer, buffer: &mut [u32], depth_buffer: &mut [f32]){
         let scale = i32::clamp(self.scale as i32, 1, i32::MAX);
         for character in 0..self.text.len() {
             let img = self.font.get_character(self.text.chars().nth(character).unwrap());
             if let Some(img) = img {
                 for x in 0..img.width() {
                     for y in 0..img.height() {
-                        let mut color = img.get_pixel(x, y).to_rgba();
+                        let color = img.get_pixel(x, y).to_rgba();
                         /*
                         for i in 0..3 {
                             color.0[i] = (color.0[i] as f32 / 255.0 * self.color[i] as f32 / 255.0) as u8;
@@ -557,7 +561,7 @@ impl DrawableElement for ParticleElement {
         *self = new;
     }
 
-    fn render(&self, renderer: &Renderer, buffer: &mut [u32], depth_buffer: &mut Vec<f32>){
+    fn render(&self, renderer: &Renderer, buffer: &mut [u32], depth_buffer: &mut [f32]){
         let pos = renderer.get_pixel_pos([self.position.x(), self.position.y()]);
         renderer.draw_circle(buffer, depth_buffer, (pos[0] as i32, pos[1] as i32, self.get_depth()), self.size * renderer.get_render_scale(), self.color)
     }
@@ -601,13 +605,12 @@ dyn_clone::clone_trait_object!(<T> ElementAnimation<T> where T: DrawableElement)
 
 #[derive(Clone)]
 struct RotateYAnimation {
-    rotation: f32,
     rate: f32,
 }
 
 impl RotateYAnimation {
     fn new(rate: f32) -> Self {
-        Self { rotation: 0.0, rate }
+        Self { rate }
     }
 }
 
@@ -643,6 +646,7 @@ impl SnowAnimation {
 impl<T: DrawableElement + DynClone> ElementAnimation<T> for SnowAnimation {
     fn update(&mut self, element: T, dt: Duration) -> T {
         let mut bounds_dimensions = [0.0, 0.0, 0.0];
+
         for i in 0..3 {
             bounds_dimensions[i] = f32::abs(self.bounds[0].pos[i] - self.bounds[1].pos[i]);
         }
@@ -729,7 +733,7 @@ impl Renderer{
         Renderer {
             width,
             height,
-            scale: 12.0,
+            scale: 14.0,
             objects: HashMap::new(),
             rotation: 0.0,
             position_offset: [0.0; 2],
@@ -737,17 +741,15 @@ impl Renderer{
         }
     }
 
-    fn render (&self, buffer: &mut [u32]) {
+    fn render (&self, buffer: &mut [u32], depth_buffer: &mut [f32]) {
         buffer.fill(0);
-        let mut depth_buffer: Vec<f32> = Vec::with_capacity(self.width * self.height);
-        depth_buffer.resize(buffer.len(), f32::INFINITY);
         for container in self.objects.values() {
             for element in container.get_transformed_elements().iter() {
                 let mut element = element.clone();
                 for id in self.transforms.keys().sorted() {
                     element.transform_by(self.transforms[id].get_rotation_matrix())
                 }
-                element.render(self, buffer, &mut depth_buffer);
+                element.render(self, buffer, depth_buffer);
             }
         }
     }
@@ -764,21 +766,21 @@ impl Renderer{
         self.scale * self.scale / 100.0 * self.height as f32 / 1080.0
     }
 
-    fn get_depth_at(&self, depth_buffer: &Vec<f32>,  pos: [i32; 2]) -> f32 {
+    fn get_depth_at(&self, depth_buffer: &[f32],  pos: [i32; 2]) -> f32 {
         if pos[0] > 0 && pos[0] < self.width as i32 && pos[1] > 0 && pos[1] < self.height as i32{
             return depth_buffer[(pos[0] + pos[1] * self.width as i32) as usize]
         }
         f32::INFINITY
     }
 
-    fn set_depth_at(&self, depth_buffer: &mut Vec<f32>, pos: [i32; 2], value: f32) {
+    fn set_depth_at(&self, depth_buffer: &mut [f32], pos: [i32; 2], value: f32) {
         if pos[0] > 0 && pos[0] < self.width as i32 && pos[1] > 0 && pos[1] < self.height as i32{
             //println!("x: {}, y: {}, width: {}, index: {}", pos[0], pos[1], self.width, (pos[0] + (pos[1] * self.width as i32)) as usize);
             depth_buffer[(pos[0] + pos[1] * self.width as i32) as usize] = value
         }
     }
 
-    fn draw_line (&self, buffer: &mut [u32], depth_buffer: &mut Vec<f32>, (x_start, y_start, start_depth): (f32, f32, f32), (x_end, y_end, end_depth): (f32, f32, f32), color: [u8; 4]) {
+    fn draw_line (&self, buffer: &mut [u32], depth_buffer: &mut [f32], (x_start, y_start, start_depth): (f32, f32, f32), (x_end, y_end, end_depth): (f32, f32, f32), color: [u8; 4]) {
 //stolen from wikipedia
         let (mut x, mut y) = (x_start, y_start);
         let dx = f32::abs(f32::clamp((x_end - x) / (y_end - y), -1.0, 1.0)) * if x_start > x_end {-1.0} else {1.0};
@@ -799,7 +801,7 @@ impl Renderer{
 
             if iters > 10000 {
                 println!("WARN: Too many line draw iterations. Aborting. (start: ({}, {}), end: ({}, {}), delta x: {}, delta y: {})", x_start, y_start, x_end, y_end, dx, dy);
-                return ()
+                return
             }
 
             //x += if right {1.0} else {-1.0};
@@ -808,7 +810,7 @@ impl Renderer{
         }
     }
 
-    fn draw_circle(&self, buffer: &mut [u32], depth_buffer: &mut Vec<f32>, (x, y, depth): (i32, i32, f32), radius: f32, color: [u8; 4]) {
+    fn draw_circle(&self, buffer: &mut [u32], depth_buffer: &mut [f32], (x, y, depth): (i32, i32, f32), radius: f32, color: [u8; 4]) {
         //check if the circle is on the screen
         if x as f32 + radius < 0.0 || y as f32 + radius < 0.0 || x as f32 - radius > self.width as f32  || y as f32 - radius > self.height as f32 {
             return;
@@ -816,11 +818,9 @@ impl Renderer{
         for i in (-radius.floor() as i32)..(radius.ceil() as i32) {
             for j in (-radius.floor() as i32)..(radius.ceil() as i32) {
                 //println!("i: {}, j: {}", i, j);
-                if ((i * i + j * j) as f32) < radius * radius {
-                    if depth < self.get_depth_at(depth_buffer, [x + i, y +j]) {
-                        self.set_depth_at(depth_buffer, [x + i, y + j], depth);
-                        self.set_color_with_alpha(buffer, (x + i, y + j), color);
-                    }
+                if ((i * i + j * j) as f32) < radius * radius && depth < self.get_depth_at(depth_buffer, [x + i, y +j]) {
+                    self.set_depth_at(depth_buffer, [x + i, y + j], depth);
+                    self.set_color_with_alpha(buffer, (x + i, y + j), color);
                 }
             }
         }
@@ -850,7 +850,7 @@ impl Renderer{
         buffer[x as usize + y as usize * self.width] =
             ((color[0] as u32) << 16) +
             ((color[1] as u32) <<  8) +
-            ((color[2] as u32) <<  0);
+            (color[2] as u32);
     }
 
     fn get_color (&self, buffer: &[u32], (x, y): (usize, usize)) -> [u8; 3]{
@@ -863,9 +863,8 @@ impl Renderer{
 
 #[cfg(not(target_arch = "wasm32"))]
 fn setup_window (event_loop: &EventLoop<()>) -> Rc<Window> {
-    let window = Rc::new(WindowBuilder::new().build(&event_loop).unwrap());
+    Rc::new(WindowBuilder::new().build(event_loop).unwrap())
     //window.set_min_inner_size(Some(LogicalSize::new(600.0, 400.0)));
-    window
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -905,6 +904,8 @@ fn setup_window (event_loop: &EventLoop<()>) -> Rc<Window> {
 
 pub fn main() {
     let event_loop = EventLoop::new().unwrap();
+    #[cfg(target_arch = "wasm32")]
+    event_loop.set_poll_strategy(PollStrategy::IdleCallback);
 
     let window = setup_window(&event_loop);
 
@@ -913,6 +914,8 @@ pub fn main() {
 
     let mut renderer = Renderer::new(window.inner_size().width as usize, window.inner_size().height as usize);
     let mut last_render = Instant::now();
+    let mut last_frame = Instant::now();
+    //let mut depth_buffer = Vec::new();
 
     let font_bytes = include_bytes!("resources/font.png");
 
@@ -995,7 +998,7 @@ pub fn main() {
                 let ornament_fac = scale_offset.powi(segment);
                 for _i in 0..(random::<f32>() * 4.0) as i32 {
                     let h = random::<f32>();
-                    let rot = random::<f32>() * 3.14 * 2.0;
+                    let rot = random::<f32>() * std::f32::consts::PI * 2.0;
                     let distance = ornament_x + (1.0 - h) * ornament_x_bottom;
                     let pos = [
                         f32::sin(rot) * distance,
@@ -1007,7 +1010,7 @@ pub fn main() {
                     renderer.objects.get_mut("tree").unwrap().elements.push(Box::new(ParticleElement::new(
                         Position::new(pos),
                         10.0 * ornament_fac,
-                        ornament_colors.choose(&mut rand::thread_rng()).unwrap().clone(),
+                        *ornament_colors.choose(&mut rand::thread_rng()).unwrap(),
                         ornament_anim,
                     )));
                 }
@@ -1058,11 +1061,11 @@ pub fn main() {
     //SNOW
     let starting_vel = [1.0, 1.6];
     let box_size = 12.0;
-    for _i in 0..(if cfg!(target_arch = "wasm32") {500} else { 2500 }){
+    for _i in 0..(if cfg!(target_arch = "wasm32") {500} else { 1500 }){
         let vel = [starting_vel[0] + random::<f32>() * 0.5, 0.0, starting_vel[1] + random::<f32>() * 0.5];
         let animation = Box::new(SnowAnimation::new(
             2.0,
-            Vector3::from(Position::new(vel)),
+            Position::new(vel),
             0.0,
             [Position::new([-box_size, -box_size, -box_size]), Position::new([box_size, box_size, box_size])],
         ));
@@ -1144,24 +1147,24 @@ pub fn main() {
                             renderer.transforms.insert(21, Box::new(XAxisRotation::from(xrot)));
                         }
                         WindowEvent::KeyboardInput {  event, ..} => {
-                            match event.state {
-                                ElementState::Pressed => {
-                                    match event.logical_key {
-                                        Key::Named(NamedKey::Escape) => {
-                                            window.set_fullscreen(None);
-                                        }
-                                        Key::Named(NamedKey::F11) => {
-                                            window.set_fullscreen(Some(Fullscreen::Borderless(None)));
-                                        }
-                                        Key::Character(char) => {
-                                            if char == "f" {
-                                                window.set_fullscreen(Some(Fullscreen::Borderless(None)));
-                                            }
-                                        }
-                                        _ => {}
+                            if event.state == ElementState::Pressed {
+                                match event.logical_key {
+                                    Key::Named(NamedKey::Escape) => {
+                                        window.set_fullscreen(None);
+                                        window.set_cursor_visible(true);
                                     }
+                                    Key::Named(NamedKey::F11) => {
+                                        window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+                                        window.set_cursor_visible(false);
+                                    }
+                                    Key::Character(char) => {
+                                        if char == "f" {
+                                            window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+                                            window.set_cursor_visible(false);
+                                        }
+                                    }
+                                    _ => {}
                                 }
-                                _ => {}
                             }
                         }
                         WindowEvent::RedrawRequested => {
@@ -1177,6 +1180,9 @@ pub fn main() {
                                 .unwrap();
 
                             let mut buffer = surface.buffer_mut().unwrap();
+                            //depth_buffer.fill(f32::INFINITY);
+                            let mut depth_buffer = vec![f32::INFINITY; buffer.len()];
+                            //depth_buffer.resize(buffer.len(), f32::INFINITY);
                             #[cfg(target_arch = "wasm32")]
                             if cfg!(target_arch = "wasm32"){
                                 let web_window = web_sys::window().expect("no global `window` exists");
@@ -1194,7 +1200,7 @@ pub fn main() {
                             renderer.update(Instant::now().duration_since(last_render));
                             last_render = Instant::now();
 
-                            renderer.render(&mut buffer);
+                            renderer.render(&mut buffer, &mut depth_buffer);
                             //renderer.draw_circle(&mut buffer, (50, 50), 10.0, [255, 255, 255, 255]);
 
                             //println!("{}", lines.lines.len());
@@ -1208,16 +1214,15 @@ pub fn main() {
                     }
                 }
             }
-            Event::NewEvents(cause) => {
-                match cause {
-                    StartCause::Poll { .. } => {
-                        if Instant::now().duration_since(last_render) > Duration::from_secs_f64(1.0 / 60.0) {
-                            renderer.rotation += 1.0;
+            Event::NewEvents(..) => {
+                if Instant::now().duration_since(last_frame) > Duration::from_secs_f64(1.0 / 60.0) {
+                    renderer.rotation += 1.0;
 
-                            window.request_redraw();
-                        }
-                    }
-                    _ => {}
+                    last_frame = Instant::now();
+                    window.request_redraw();
+                } else {
+                    #[cfg(not(target_arch = "wasm32"))] //this is broken on web, not really needed because of the poll strategy (see the top of main)
+                    elwt.set_control_flow(ControlFlow::WaitUntil(last_frame.checked_add(Duration::from_secs_f64(1.0/60.0)).expect("wait time is wrong")));
                 }
             }
             _ => {}

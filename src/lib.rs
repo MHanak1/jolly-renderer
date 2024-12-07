@@ -5,6 +5,7 @@ use wasm_bindgen::{self, prelude::*};
 #[cfg(target_arch = "wasm32")]
 use log::Level;
 
+#[cfg(target_arch = "wasm32")]
 mod main;
 
 /// This is the entry-point for all the web-assembly.
