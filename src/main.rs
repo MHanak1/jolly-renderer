@@ -31,11 +31,18 @@ use web_sys::HtmlCanvasElement;
 #[cfg(target_arch = "wasm32")]
 use winit::dpi::PhysicalSize;
 #[cfg(target_arch = "wasm32")]
+use winit::error::EventLoopError;
+#[cfg(target_arch = "wasm32")]
+use winit::platform::web::{ActiveEventLoopExtWebSys, WaitUntilStrategy};
+#[cfg(target_arch = "wasm32")]
 use winit::platform::web::PollStrategy;
 #[cfg(target_arch = "wasm32")]
 use winit::platform::web::WindowAttributesExtWebSys;
 #[cfg(target_arch = "wasm32")]
 use winit::platform::web::WindowExtWebSys;
+#[cfg(target_arch = "wasm32")]
+use log::error;
+use winit::event_loop;
 
 #[path = "utils/winit_app.rs"]
 mod winit_app;
@@ -43,6 +50,48 @@ mod winit_app;
 #[derive(Clone)]
 struct Matrix3<T: Mul + Clone> {
     mat: [[T; 3]; 3],
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+extern "C" {
+    // Use `js_namespace` here to bind `console.log(..)` instead of just
+    // `log(..)`
+    #[wasm_bindgen(js_namespace = console)]
+    fn log(s: &str);
+
+    #[wasm_bindgen(js_namespace = console)]
+    fn error(s: &str);
+
+}
+
+
+#[cfg(target_arch = "wasm32")]
+macro_rules! console_log {
+    // Note that this is using the `log` function imported above during
+    // `bare_bones`
+    ($($t:tt)*) => (log(&format_args!($($t)*).to_string()))
+}
+
+#[cfg(target_arch = "wasm32")]
+macro_rules! console_error {
+    // Note that this is using the `log` function imported above during
+    // `bare_bones`
+    ($($t:tt)*) => (error(&format_args!($($t)*).to_string()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+macro_rules! console_log {
+    // Note that this is using the `log` function imported above during
+    // `bare_bones`
+    ($($t:tt)*) => (println!("{}", &format_args!($($t)*).to_string()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+macro_rules! console_error {
+    // Note that this is using the `log` function imported above during
+    // `bare_bones`
+    ($($t:tt)*) => (println!("{}", &format_args!($($t)*).to_string()))
 }
 
 impl<T: Mul + Clone> Matrix3<T> {
@@ -872,7 +921,7 @@ impl Renderer {
             iters += 1;
 
             if iters > 10000 {
-                println!("WARN: Too many line draw iterations. Aborting. (start: ({}, {}), end: ({}, {}), delta x: {}, delta y: {})", x_start, y_start, x_end, y_end, dx, dy);
+                console_error!("WARN: Too many line draw iterations. Aborting. (start: ({}, {}), end: ({}, {}), delta x: {}, delta y: {})", x_start, y_start, x_end, y_end, dx, dy);
                 return;
             }
 
@@ -967,32 +1016,38 @@ impl ApplicationHandler for ControlFlowHandler {
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
         match self.window {
             Some(ref window) => {
-                if Instant::now().duration_since(self.last_frame)
-                    > Duration::from_secs_f64(1.0 / 60.0)
-                {
-                    self.renderer.rotation += 1.0;
+                match cause {
+                    StartCause::ResumeTimeReached { start, requested_resume } => {
+                        event_loop.set_control_flow(ControlFlow::WaitUntil(
+                            self.last_frame
+                                .checked_add(Duration::from_secs_f64(1.0/60.0))
+                                .expect("wait time is wrong")
+                        ));
 
-                    self.last_frame = Instant::now();
-                    window.request_redraw();
-                } else {
-                    //#[cfg(not(target_arch = "wasm32"))] //this is broken on web, not really needed because of the poll strategy (see the top of main)
-                    event_loop.set_control_flow(ControlFlow::wait_duration(
-                        self.last_frame
-                            .checked_add(Duration::from_secs_f64(1.0 / 60.0))
-                            .expect("wait time is wrong")
-                            .duration_since(Instant::now()),
-                    ));
-                    //#[cfg(target_arch = "wasm32")]
-                    //wasm_thread::sleep(last_frame.checked_add(Duration::from_secs_f64(1.0/60.0)).expect("wait time is wrong").duration_since(Instant::now()));
+                        self.renderer.rotation += 1.0;
+
+                        self.last_frame = Instant::now();
+                        window.request_redraw();
+                    }
+                    _ => {
+                        event_loop.set_control_flow(ControlFlow::WaitUntil(
+                            self.last_frame
+                                .checked_add(Duration::from_secs_f64(1.0/60.0))
+                                .expect("wait time is wrong")
+                        ));
+                    }
                 }
             }
-            _ => {}
+            None => {
+                console_error!("Window is None")
+            }
         }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         //self.window = Rc::new(WindowBuilder::new().build(event_loop).unwrap())
+        //event_loop.set_control_flow(ControlFlow::Poll);
         self.window = Some(Rc::new(
             event_loop
                 .create_window(Window::default_attributes())
@@ -1001,6 +1056,8 @@ impl ApplicationHandler for ControlFlowHandler {
     }
     #[cfg(target_arch = "wasm32")]
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        event_loop.set_wait_until_strategy(WaitUntilStrategy::Worker);
+
         let window = web_sys::window().expect("no global `window` exists");
         let document = window.document().expect("should have a document on window");
         let body = document.body().expect("document should have a body");
@@ -1027,7 +1084,10 @@ impl ApplicationHandler for ControlFlowHandler {
             .unwrap();
 
         self.window = Some(Rc::new(
-            ActiveEventLoop::create_window(event_loop, Window::default_attributes()).unwrap(),
+            event_loop.create_window(
+                Window::default_attributes()
+                .with_canvas(Some(canvas))
+            ).unwrap(),
         ));
     }
 
@@ -1105,6 +1165,11 @@ impl ApplicationHandler for ControlFlowHandler {
                                 (size.width, size.height)
                             };
 
+                            if width <= 0 || height <= 0 {
+                                console_error!("Width and Size must be non zero");
+                                return;
+                            }
+
                             let context =
                                 softbuffer::Context::new(self.window.clone().unwrap()).unwrap();
                             let mut surface =
@@ -1165,15 +1230,19 @@ impl ApplicationHandler for ControlFlowHandler {
                     }
                 }
             }
-            _ => {}
+            _ => {
+                console_error!("Window is None")
+            }
         }
     }
 }
 
+pub async fn run() {
+    main();
+}
+
 pub fn main() {
-    let event_loop = EventLoop::new().unwrap();
     //#[cfg(target_arch = "wasm32")]
-    //event_loop.set_poll_strategy (PollStrategy::IdleCallback);
 
     let mut renderer = Renderer::new(0, 0);
     let mut last_render = Instant::now();
@@ -1438,14 +1507,27 @@ pub fn main() {
     renderer.lines.lines.push(Line::new([ 5.0, -5.0,  5.0], [ 5.0,  5.0,  5.0], [0, 255, 0, 255]));
      */
 
-    event_loop.set_control_flow(ControlFlow::Poll);
-
-    event_loop
-        .run_app(&mut ControlFlowHandler {
-            window: None,
-            renderer,
-            last_render,
-            last_frame,
-        })
-        .expect("Shit's fucked (the event loop expected)");
+    let event_loop = EventLoop::new();
+    match event_loop {
+        Ok(event_loop) => {
+            let result = event_loop
+                .run_app(&mut ControlFlowHandler {
+                    window: None,
+                    renderer,
+                    last_render,
+                    last_frame,
+                });
+            match result {
+                Ok(..) => {
+                    console_log!("Event loop exited with no errors");
+                }
+                Err(error) => {
+                    console_error!("Event loop exited with an error: {}", error);
+                }
+            }
+        }
+        Err(error) => {
+            console_error!("{}", error);
+        }
+    }
 }
