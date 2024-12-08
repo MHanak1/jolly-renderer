@@ -1,9 +1,9 @@
 // ----------------------------------------------------------------------------
 // When compiling for web:
 #[cfg(target_arch = "wasm32")]
-use wasm_bindgen::{self, prelude::*};
-#[cfg(target_arch = "wasm32")]
 use log::Level;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{self, prelude::*};
 
 #[cfg(target_arch = "wasm32")]
 mod main;
