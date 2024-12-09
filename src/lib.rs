@@ -30,7 +30,6 @@ pub async fn start() -> Result<(), JsValue> {
 
     }
 
-
     #[cfg(target_arch = "wasm32")]
     macro_rules! console_log {
         // Note that this is using the `log` function imported above during

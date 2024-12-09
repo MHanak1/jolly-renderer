@@ -12,7 +12,7 @@ use std::ops::{Add, Mul};
 use std::rc::Rc;
 use std::thread;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, Event, MouseScrollDelta, StartCause, WindowEvent};
+use winit::event::{ElementState, Event, MouseScrollDelta, StartCause, Touch, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, Window, WindowId};
@@ -22,6 +22,8 @@ use std::time::{Duration, Instant};
 #[cfg(target_arch = "wasm32")]
 use web_time::{Duration, Instant};
 
+#[cfg(target_arch = "wasm32")]
+use log::error;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::__rt::Start;
 #[cfg(target_arch = "wasm32")]
@@ -33,15 +35,14 @@ use winit::dpi::PhysicalSize;
 #[cfg(target_arch = "wasm32")]
 use winit::error::EventLoopError;
 #[cfg(target_arch = "wasm32")]
-use winit::platform::web::{ActiveEventLoopExtWebSys, WaitUntilStrategy};
-#[cfg(target_arch = "wasm32")]
 use winit::platform::web::PollStrategy;
 #[cfg(target_arch = "wasm32")]
 use winit::platform::web::WindowAttributesExtWebSys;
 #[cfg(target_arch = "wasm32")]
 use winit::platform::web::WindowExtWebSys;
 #[cfg(target_arch = "wasm32")]
-use log::error;
+use winit::platform::web::{ActiveEventLoopExtWebSys, WaitUntilStrategy};
+
 use winit::event_loop;
 
 #[path = "utils/winit_app.rs"]
@@ -64,7 +65,6 @@ extern "C" {
     fn error(s: &str);
 
 }
-
 
 #[cfg(target_arch = "wasm32")]
 macro_rules! console_log {
@@ -91,7 +91,7 @@ macro_rules! console_log {
 macro_rules! console_error {
     // Note that this is using the `log` function imported above during
     // `bare_bones`
-    ($($t:tt)*) => (println!("{}", &format_args!($($t)*).to_string()))
+    ($($t:tt)*) => (eprintln!("\x1b[91mError: {}\x1b[0m", &format_args!($($t)*).to_string()))
 }
 
 impl<T: Mul + Clone> Matrix3<T> {
@@ -569,7 +569,13 @@ impl DrawableElement for TextElement {
                                     - self.text.len() as i32 * self.font.width as i32 / 2 * scale
                                     + renderer.width as i32 / 2
                                     + i;
-                                let ny: i32 = y as i32 * scale + self.position.get()[1] as i32 + j;
+                                let mut ny: i32 =
+                                    y as i32 * scale + self.position.get()[1] as i32 + j;
+
+                                if self.position.y() < 0.0 {
+                                    ny += renderer.height as i32
+                                        - (self.font.font_image.height() as f32 * self.scale) as i32
+                                }
 
                                 if self.get_depth() < renderer.get_depth_at(depth_buffer, [nx, ny])
                                 {
@@ -844,7 +850,7 @@ impl Renderer {
         Renderer {
             width,
             height,
-            scale: 14.0,
+            scale: 13.0,
             objects: HashMap::new(),
             rotation: 0.0,
             position_offset: [0.0; 2],
@@ -1010,34 +1016,39 @@ struct ControlFlowHandler {
     renderer: Renderer,
     last_render: Instant,
     last_frame: Instant,
+    last_touch: Option<Touch>,
+    last_second_touch: Option<Touch>,
+    xrot: f32,
+    yrot: f32
 }
 
 impl ApplicationHandler for ControlFlowHandler {
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
         match self.window {
-            Some(ref window) => {
-                match cause {
-                    StartCause::ResumeTimeReached { start, requested_resume } => {
-                        event_loop.set_control_flow(ControlFlow::WaitUntil(
-                            self.last_frame
-                                .checked_add(Duration::from_secs_f64(1.0/60.0))
-                                .expect("wait time is wrong")
-                        ));
+            Some(ref window) => match cause {
+                StartCause::ResumeTimeReached {
+                    start,
+                    requested_resume,
+                } => {
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(
+                        self.last_frame
+                            .checked_add(Duration::from_secs_f64(1.0 / 60.0))
+                            .expect("wait time is wrong"),
+                    ));
 
-                        self.renderer.rotation += 1.0;
+                    self.renderer.rotation += 1.0;
 
-                        self.last_frame = Instant::now();
-                        window.request_redraw();
-                    }
-                    _ => {
-                        event_loop.set_control_flow(ControlFlow::WaitUntil(
-                            self.last_frame
-                                .checked_add(Duration::from_secs_f64(1.0/60.0))
-                                .expect("wait time is wrong")
-                        ));
-                    }
+                    self.last_frame = Instant::now();
+                    window.request_redraw();
                 }
-            }
+                _ => {
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(
+                        self.last_frame
+                            .checked_add(Duration::from_secs_f64(1.0 / 60.0))
+                            .expect("wait time is wrong"),
+                    ));
+                }
+            },
             None => {
                 console_error!("Window is None")
             }
@@ -1068,8 +1079,8 @@ impl ApplicationHandler for ControlFlowHandler {
             .map_err(|_| ())
             .unwrap();
         canvas.set_attribute("id", "canvas").unwrap();
-        canvas.set_width(window.inner_width().unwrap().as_f64().unwrap() as u32);
-        canvas.set_height(window.inner_height().unwrap().as_f64().unwrap() as u32);
+        canvas.set_width((window.inner_width().unwrap().as_f64().unwrap()) as u32);
+        canvas.set_height((window.inner_height().unwrap().as_f64().unwrap()) as u32);
 
         body.append_child(&canvas).unwrap();
 
@@ -1079,15 +1090,14 @@ impl ApplicationHandler for ControlFlowHandler {
             .unwrap()
             .dyn_into::<web_sys::CanvasRenderingContext2d>()
             .unwrap();
-        context
-            .scale(window.device_pixel_ratio(), window.device_pixel_ratio())
-            .unwrap();
+        //context
+        //.scale(window.device_pixel_ratio(), window.device_pixel_ratio())
+        //.unwrap();
 
         self.window = Some(Rc::new(
-            event_loop.create_window(
-                Window::default_attributes()
-                .with_canvas(Some(canvas))
-            ).unwrap(),
+            event_loop
+                .create_window(Window::default_attributes().with_canvas(Some(canvas)))
+                .unwrap(),
         ));
     }
 
@@ -1112,7 +1122,7 @@ impl ApplicationHandler for ControlFlowHandler {
 
                                     if cfg!(target_arch = "wasm32") {
                                         self.renderer.scale +=
-                                            f32::clamp(delta.y as f32 / 15.0, -1.0, 1.0);
+                                            f32::clamp(delta.y as f32 / 50.0, -1.0, 1.0);
                                     //clamps because if scrolling with a mouse the value would be wayyy to high
                                     } else {
                                         self.renderer.scale += delta.y as f32 / 5.0
@@ -1122,20 +1132,73 @@ impl ApplicationHandler for ControlFlowHandler {
                             self.renderer.scale = self.renderer.scale.clamp(8.0, 25.0);
                         }
                         WindowEvent::CursorMoved { position, .. } => {
-                            let xrot = (position.y as f32
+                            self.xrot = (position.y as f32
                                 - window.inner_size().height as f32 / 2.0)
                                 / window.inner_size().height as f32
                                 * 100.0;
-                            let yrot = (position.x as f32 - window.inner_size().width as f32 / 2.0)
+                            self.yrot = (position.x as f32
+                                - window.inner_size().width as f32 / 2.0)
                                 / window.inner_size().width as f32
                                 * 100.0;
 
                             self.renderer
                                 .transforms
-                                .insert(20, Box::new(YAxisRotation::from(-yrot)));
+                                .insert(21, Box::new(XAxisRotation::from(self.xrot)));
                             self.renderer
                                 .transforms
-                                .insert(21, Box::new(XAxisRotation::from(xrot)));
+                                .insert(20, Box::new(YAxisRotation::from(-self.yrot)));
+                        }
+                        WindowEvent::Touch(touch) => {
+                            if touch.id == 0 {
+                                match touch.phase {
+                                    TouchPhase::Started => {
+                                        self.last_touch = Some(touch);
+                                    }
+                                    TouchPhase::Moved => {
+                                        let (delta_x, delta_y) = (
+                                            touch.location.x - self.last_touch.unwrap().location.x,
+                                            touch.location.y - self.last_touch.unwrap().location.y,
+                                        );
+                                        self.last_touch = Some(touch);
+
+                                        if self.last_second_touch.is_none() {
+                                            self.xrot += delta_y as f32 / window.inner_size().width as f32 * 90.0;
+                                            self.yrot += delta_x as f32 / window.inner_size().width as f32 * 90.0;
+
+                                            self.renderer
+                                                .transforms
+                                                .insert(21, Box::new(XAxisRotation::from(self.xrot)));
+                                            self.renderer
+                                                .transforms
+                                                .insert(20, Box::new(YAxisRotation::from(-self.yrot)));
+                                        }
+                                    }
+                                    _ => {
+                                        self.last_touch = None
+                                    }
+                                }
+                            } /*else if (touch.id == 1) {
+                                match touch.phase {
+                                    TouchPhase::Started => {
+                                        self.last_second_touch = Some(touch);
+                                    }
+                                    TouchPhase::Moved => {
+                                        if self.last_touch.is_some() && self.last_second_touch.is_some() {
+                                            let distance =
+                                                (self.last_touch.unwrap().location.x - self.last_second_touch.unwrap().location.x) * (touch.location.x - self.last_second_touch.unwrap().location.x)
+                                                    + (self.last_touch.unwrap().location.y - self.last_second_touch.unwrap().location.y) * (touch.location.y - self.last_second_touch.unwrap().location.y);
+                                            self.last_second_touch = Some(touch);
+                                            let new_distance =
+                                                (self.last_touch.unwrap().location.x - self.last_second_touch.unwrap().location.x) * (touch.location.x - self.last_second_touch.unwrap().location.x)
+                                                    + (self.last_touch.unwrap().location.y - self.last_second_touch.unwrap().location.y) * (touch.location.y - self.last_second_touch.unwrap().location.y);
+                                            self.renderer.scale += (distance / new_distance) as f32;
+                                        }
+                                    }
+                                    _ => {
+                                        self.last_second_touch = None
+                                    }
+                                }
+                            }*/
                         }
                         WindowEvent::KeyboardInput { event, .. } => {
                             if event.state == ElementState::Pressed {
@@ -1167,13 +1230,13 @@ impl ApplicationHandler for ControlFlowHandler {
 
                             if width <= 0 || height <= 0 {
                                 console_error!("Width and Size must be non zero");
-                                return;
                             }
 
                             let context =
                                 softbuffer::Context::new(self.window.clone().unwrap()).unwrap();
                             let mut surface =
                                 Surface::new(&context, self.window.clone().unwrap()).unwrap();
+
                             surface
                                 .resize(
                                     NonZeroU32::new(width).unwrap(),
@@ -1182,20 +1245,27 @@ impl ApplicationHandler for ControlFlowHandler {
                                 .unwrap();
 
                             let mut buffer = surface.buffer_mut().unwrap();
+
                             //depth_buffer.fill(f32::INFINITY);
                             let mut depth_buffer = vec![f32::INFINITY; buffer.len()];
                             //depth_buffer.resize(buffer.len(), f32::INFINITY);
+
                             #[cfg(target_arch = "wasm32")]
                             if cfg!(target_arch = "wasm32") {
                                 let web_window =
                                     web_sys::window().expect("no global `window` exists");
-                                let (w, h) = (
-                                    web_window.inner_width().unwrap().as_f64().unwrap()
-                                        * web_window.device_pixel_ratio(),
-                                    web_window.inner_height().unwrap().as_f64().unwrap()
-                                        * web_window.device_pixel_ratio(),
+                                let ratio = f64::clamp(web_window.device_pixel_ratio(), 1.0, 3.0); //f64 because fuck you that's why.
+                                let (w, h) = ( //the actual screen dimensions
+                                    web_window.inner_width().unwrap().as_f64().unwrap() * web_window.device_pixel_ratio(),
+                                    web_window.inner_height().unwrap().as_f64().unwrap() * web_window.device_pixel_ratio(), //relevant to the commend below
                                 );
-                                let _ = window.request_inner_size(PhysicalSize::new(w, h));
+                                let _ = window.request_inner_size(PhysicalSize::new(w / ratio / ratio, h / ratio / ratio));
+
+                                //instead of just scaling by the pixel ratio, do it twice so mobile devices are pixelated for more performance
+                                //if not scaled up the canvas will sit too small / too big in the corner.
+                                //ratio corrects for the previous division, and device_pixel_ratio() scales the canvas up to fullscreen
+                                let _ = window.canvas().unwrap().style().set_property("transform", &*format!{"scale({})", ratio * ratio});
+
                             }
 
                             self.renderer.width = width as usize;
@@ -1220,7 +1290,6 @@ impl ApplicationHandler for ControlFlowHandler {
                             //self.renderer.draw_circle(&mut buffer, (50, 50), 10.0, [255, 255, 255, 255]);
 
                             //println!("{}", lines.lines.len());
-
                             buffer.present().unwrap();
                         }
                         WindowEvent::CloseRequested => {
@@ -1265,7 +1334,7 @@ pub fn main() {
 
     //TREE
     renderer.objects.get_mut("tree").unwrap().position =
-        Box::<Vector3>::new(Vector3::new([0.0, -2.0, 0.0]));
+        Box::<Vector3>::new(Vector3::new([0.0, -1.9, 0.0]));
     //renderer.containers.get_mut("tree").unwrap().position = Box::<Vector3>::new(Vector3::new([0.0, -1.2, 0.0]));
 
     let mut verts = [
@@ -1423,7 +1492,27 @@ pub fn main() {
             pos: [0.0, 20.0],
             z: 1000.0, // render behind stuff
         },
-        text: "Merry Crimas".to_string(),
+        text: "Merry".to_string(),
+        scale: 2.0,
+        color: [255, 0, 0, 255],
+        font: Font {
+            font_image: font.clone(),
+            width: 32,
+            has_uppercase: false,
+        },
+    });
+    renderer
+        .objects
+        .get_mut("text")
+        .unwrap()
+        .elements
+        .push(text);
+    let text = Box::new(TextElement {
+        position: ScreenPosition {
+            pos: [0.0, -20.0],
+            z: 1000.0, // render behind stuff
+        },
+        text: "Crimas".to_string(),
         scale: 2.0,
         color: [255, 0, 0, 255],
         font: Font {
@@ -1443,7 +1532,7 @@ pub fn main() {
     let starting_vel = [1.0, 1.6];
     let box_size = 12.0;
     for _i in 0..(if cfg!(target_arch = "wasm32") {
-        500
+        1500
     } else {
         1500
     }) {
@@ -1452,7 +1541,7 @@ pub fn main() {
             0.0,
             starting_vel[1] + random::<f32>() * 0.5,
         ];
-        let animation = Box::new(SnowAnimation::new(
+        let mut animation = Box::new(SnowAnimation::new(
             2.0,
             Position::new(vel),
             0.0,
@@ -1461,6 +1550,7 @@ pub fn main() {
                 Position::new([box_size, box_size, box_size]),
             ],
         ));
+        animation.opacity_falloff_distance = 5.0;
         let pos = [
             (random::<f32>() - 0.5) * box_size * 2.0,
             (random::<f32>() - 0.5) * box_size * 2.0,
@@ -1468,7 +1558,7 @@ pub fn main() {
         ];
         renderer
             .objects
-            .get_mut("tree")
+            .get_mut("snow")
             .unwrap()
             .elements
             .push(Box::new(ParticleElement::new(
@@ -1510,13 +1600,16 @@ pub fn main() {
     let event_loop = EventLoop::new();
     match event_loop {
         Ok(event_loop) => {
-            let result = event_loop
-                .run_app(&mut ControlFlowHandler {
-                    window: None,
-                    renderer,
-                    last_render,
-                    last_frame,
-                });
+            let result = event_loop.run_app(&mut ControlFlowHandler {
+                window: None,
+                renderer,
+                last_render,
+                last_frame,
+                last_touch: None,
+                last_second_touch: None,
+                xrot: 0.0,
+                yrot: 0.0,
+            });
             match result {
                 Ok(..) => {
                     console_log!("Event loop exited with no errors");
