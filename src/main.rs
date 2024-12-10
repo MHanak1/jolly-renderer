@@ -12,7 +12,9 @@ use std::ops::{Add, Mul};
 use std::rc::Rc;
 use std::thread;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, Event, MouseScrollDelta, StartCause, Touch, TouchPhase, WindowEvent};
+use winit::event::{
+    ElementState, Event, MouseScrollDelta, StartCause, Touch, TouchPhase, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, Window, WindowId};
@@ -835,14 +837,81 @@ impl DrawableObject {
     }
 }
 
+trait ImageFilter {
+    fn apply(&self, renderer: &Renderer, buffer: &mut [u32]);
+}
+
+/*
+struct BoxBlurFilter {
+    size: i32,
+}
+
+//shit's slow
+impl ImageFilter for BoxBlurFilter {
+    fn apply(&self, renderer: &Renderer, buffer: &mut [u32]) {
+        let old_buffer = &mut vec![];
+        buffer.clone_into(old_buffer);
+        for x in 0..renderer.width as i32 {
+            for y in 0..renderer.height as i32 {
+                let mut pixels = 0;
+                let mut avg_col = [0; 3];
+                for i in (-self.size)..self.size {
+                    let p = x + i;
+                    if p > 0 && p < renderer.width as i32 {
+                        pixels += 1;
+                        let ncol = renderer.get_color(old_buffer, (p as usize, y as usize));
+                        for j in 0..3 {
+                            avg_col[j] += ncol[j] as u32;
+                        }
+                    }
+                }
+                if pixels != 0 {
+                    let mut new_color = [0; 3];
+                    for i in 0..3 {
+                        new_color[i] = (avg_col[i] / pixels) as u8;
+                    }
+                    renderer.set_color(buffer, (x, y), new_color);
+                }
+            }
+        }
+        buffer.clone_into(old_buffer);
+        for x in 0..renderer.width as i32 {
+            for y in 0..renderer.height as i32 {
+                let mut pixels = 0;
+                let mut avg_col = [0; 3];
+                for i in (-self.size)..self.size {
+                    let p = y + i;
+                    if p > 0 && p < renderer.height as i32 {
+                        pixels += 1;
+                        let ncol = renderer.get_color(old_buffer, (x as usize, p as usize));
+                        for j in 0..3 {
+                            avg_col[j] += ncol[j] as u32;
+                        }
+                    }
+                }
+                if pixels != 0 {
+                    let mut new_color = [0; 3];
+                    for i in 0..3 {
+                        new_color[i] = (avg_col[i] / pixels) as u8;
+                    }
+                    renderer.set_color(buffer, (x, y), new_color);
+                }
+            }
+        }
+    }
+}
+*/
 struct Renderer {
     width: usize,
     height: usize,
     scale: f32,
+    min_scale: f32,
+    max_scale: f32,
     objects: HashMap<String, DrawableObject>,
     rotation: f32,
     position_offset: [f32; 2],
     transforms: HashMap<u16, Box<dyn TransformMatrix>>, //u16 is the id
+    filters: Vec<Box<dyn ImageFilter>>,
 }
 
 impl Renderer {
@@ -851,10 +920,13 @@ impl Renderer {
             width,
             height,
             scale: 13.0,
+            min_scale: 8.0,
+            max_scale: 25.0,
             objects: HashMap::new(),
             rotation: 0.0,
             position_offset: [0.0; 2],
             transforms: HashMap::new(),
+            filters: Vec::new(),
         }
     }
 
@@ -868,6 +940,9 @@ impl Renderer {
                 }
                 element.render(self, buffer, depth_buffer);
             }
+        }
+        for filter in &self.filters {
+            filter.apply(self, buffer)
         }
     }
 
@@ -1016,12 +1091,28 @@ struct ControlFlowHandler {
     renderer: Renderer,
     last_render: Instant,
     last_frame: Instant,
-    last_touch: Option<Touch>,
-    last_second_touch: Option<Touch>,
-    xrot: f32,
-    yrot: f32
+    touches: [Option<Touch>; 5],
+    scale_before_touch_scaling: f32,
+    starting_touch_scaling_distance: f32,
+    x_rot: f32,
+    y_rot: f32,
 }
 
+impl ControlFlowHandler {
+    fn new(renderer: Renderer) -> ControlFlowHandler {
+        Self {
+            window: None,
+            renderer,
+            last_render: Instant::now(),
+            last_frame: Instant::now(),
+            touches: [None; 5],
+            scale_before_touch_scaling: 1.0,
+            starting_touch_scaling_distance: 0.0,
+            x_rot: 0.0,
+            y_rot: 0.0,
+        }
+    }
+}
 impl ApplicationHandler for ControlFlowHandler {
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
         match self.window {
@@ -1129,76 +1220,145 @@ impl ApplicationHandler for ControlFlowHandler {
                                     };
                                 }
                             }
-                            self.renderer.scale = self.renderer.scale.clamp(8.0, 25.0);
+                            self.renderer.scale = self
+                                .renderer
+                                .scale
+                                .clamp(self.renderer.min_scale, self.renderer.max_scale);
                         }
                         WindowEvent::CursorMoved { position, .. } => {
-                            self.xrot = (position.y as f32
+                            self.x_rot = (position.y as f32
                                 - window.inner_size().height as f32 / 2.0)
                                 / window.inner_size().height as f32
                                 * 100.0;
-                            self.yrot = (position.x as f32
+                            self.y_rot = (position.x as f32
                                 - window.inner_size().width as f32 / 2.0)
                                 / window.inner_size().width as f32
                                 * 100.0;
 
                             self.renderer
                                 .transforms
-                                .insert(21, Box::new(XAxisRotation::from(self.xrot)));
+                                .insert(21, Box::new(XAxisRotation::from(self.x_rot)));
                             self.renderer
                                 .transforms
-                                .insert(20, Box::new(YAxisRotation::from(-self.yrot)));
+                                .insert(20, Box::new(YAxisRotation::from(-self.y_rot)));
                         }
+
                         WindowEvent::Touch(touch) => {
-                            if touch.id == 0 {
-                                match touch.phase {
-                                    TouchPhase::Started => {
-                                        self.last_touch = Some(touch);
-                                    }
-                                    TouchPhase::Moved => {
-                                        let (delta_x, delta_y) = (
-                                            touch.location.x - self.last_touch.unwrap().location.x,
-                                            touch.location.y - self.last_touch.unwrap().location.y,
-                                        );
-                                        self.last_touch = Some(touch);
+                            if touch.id >= 5 {
+                                return;
+                            }
+                            let mut fingers = 0; //how many fingers are smearing the screen
+                            for t in self.touches {
+                                if t.is_some() {
+                                    fingers += 1
+                                }
+                            }
+                            match touch.phase {
+                                TouchPhase::Started => {
+                                    self.touches[touch.id as usize] = Some(touch);
+                                }
+                                TouchPhase::Moved => {
+                                    if (fingers == 1) {
+                                        if self.starting_touch_scaling_distance < 0.0 {
+                                            let (delta_x, delta_y) = (
+                                                touch.location.x
+                                                    - self.touches[touch.id as usize]
+                                                        .unwrap()
+                                                        .location
+                                                        .x,
+                                                touch.location.y
+                                                    - self.touches[touch.id as usize]
+                                                        .unwrap()
+                                                        .location
+                                                        .y,
+                                            );
 
-                                        if self.last_second_touch.is_none() {
-                                            self.xrot += delta_y as f32 / window.inner_size().width as f32 * 90.0;
-                                            self.yrot += delta_x as f32 / window.inner_size().width as f32 * 90.0;
+                                            self.x_rot += delta_y as f32
+                                                / window.inner_size().width as f32
+                                                * 90.0;
+                                            self.y_rot += delta_x as f32
+                                                / window.inner_size().width as f32
+                                                * 90.0;
 
-                                            self.renderer
-                                                .transforms
-                                                .insert(21, Box::new(XAxisRotation::from(self.xrot)));
-                                            self.renderer
-                                                .transforms
-                                                .insert(20, Box::new(YAxisRotation::from(-self.yrot)));
+                                            self.renderer.transforms.insert(
+                                                21,
+                                                Box::new(XAxisRotation::from(self.x_rot)),
+                                            );
+                                            self.renderer.transforms.insert(
+                                                20,
+                                                Box::new(YAxisRotation::from(-self.y_rot)),
+                                            );
+                                        } else {
+                                            self.touches = [None; 5]; //dooptey doo, dirty fix for movement jerking sometimes after scaling
+                                        }
+                                    } else if touch.id == 0 {
+                                        //god only knows what this will do when you have 3 fingers on the screen
+                                        let mut second_touch = None;
+                                        for t in self.touches.iter() {
+                                            if t.is_some() {
+                                                if t.unwrap().id != touch.id {
+                                                    second_touch = Some(t);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        //if second_touch is none after this the user should seek god
+                                        match second_touch {
+                                            None => {
+                                                console_error!("Wait a minute, you said there were two fingers on the screen")
+                                            }
+                                            Some(second_touch) => {
+                                                if (touch.location.x
+                                                    == self.touches[touch.id as usize]
+                                                        .unwrap()
+                                                        .location
+                                                        .x
+                                                    && touch.location.y
+                                                        == self.touches[touch.id as usize]
+                                                            .unwrap()
+                                                            .location
+                                                            .y)
+                                                {
+                                                    //fixes a bug where if the fingers didn't move the screen would suddenly change scale
+                                                    self.scale_before_touch_scaling =
+                                                        self.renderer.scale;
+                                                    self.starting_touch_scaling_distance = -1.0;
+                                                } else {
+                                                    let distance_x: f32 = (touch.location.x
+                                                        - second_touch.unwrap().location.x)
+                                                        as f32;
+                                                    let distance_y: f32 = (touch.location.y
+                                                        - second_touch.unwrap().location.y)
+                                                        as f32;
+                                                    let distance = f32::sqrt(
+                                                        distance_x * distance_x
+                                                            + distance_y * distance_y,
+                                                    );
+
+                                                    if self.starting_touch_scaling_distance < 0.0 {
+                                                        self.starting_touch_scaling_distance =
+                                                            distance;
+                                                    } else {
+                                                        let ratio = distance
+                                                            / self.starting_touch_scaling_distance;
+                                                        self.renderer.scale = f32::clamp(
+                                                            self.scale_before_touch_scaling * ratio,
+                                                            self.renderer.min_scale,
+                                                            self.renderer.max_scale,
+                                                        );
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
-                                    _ => {
-                                        self.last_touch = None
-                                    }
+                                    self.touches[touch.id as usize] = Some(touch);
                                 }
-                            } /*else if (touch.id == 1) {
-                                match touch.phase {
-                                    TouchPhase::Started => {
-                                        self.last_second_touch = Some(touch);
-                                    }
-                                    TouchPhase::Moved => {
-                                        if self.last_touch.is_some() && self.last_second_touch.is_some() {
-                                            let distance =
-                                                (self.last_touch.unwrap().location.x - self.last_second_touch.unwrap().location.x) * (touch.location.x - self.last_second_touch.unwrap().location.x)
-                                                    + (self.last_touch.unwrap().location.y - self.last_second_touch.unwrap().location.y) * (touch.location.y - self.last_second_touch.unwrap().location.y);
-                                            self.last_second_touch = Some(touch);
-                                            let new_distance =
-                                                (self.last_touch.unwrap().location.x - self.last_second_touch.unwrap().location.x) * (touch.location.x - self.last_second_touch.unwrap().location.x)
-                                                    + (self.last_touch.unwrap().location.y - self.last_second_touch.unwrap().location.y) * (touch.location.y - self.last_second_touch.unwrap().location.y);
-                                            self.renderer.scale += (distance / new_distance) as f32;
-                                        }
-                                    }
-                                    _ => {
-                                        self.last_second_touch = None
-                                    }
-                                }
-                            }*/
+                                _ => self.touches[touch.id as usize] = None,
+                            }
+                            if (fingers < 2) {
+                                self.scale_before_touch_scaling = self.renderer.scale;
+                                self.starting_touch_scaling_distance = -1.0;
+                            }
                         }
                         WindowEvent::KeyboardInput { event, .. } => {
                             if event.state == ElementState::Pressed {
@@ -1255,17 +1415,26 @@ impl ApplicationHandler for ControlFlowHandler {
                                 let web_window =
                                     web_sys::window().expect("no global `window` exists");
                                 let ratio = f64::clamp(web_window.device_pixel_ratio(), 1.0, 3.0); //f64 because fuck you that's why.
-                                let (w, h) = ( //the actual screen dimensions
-                                    web_window.inner_width().unwrap().as_f64().unwrap() * web_window.device_pixel_ratio(),
-                                    web_window.inner_height().unwrap().as_f64().unwrap() * web_window.device_pixel_ratio(), //relevant to the commend below
+                                let (w, h) = (
+                                    //the actual screen dimensions
+                                    web_window.inner_width().unwrap().as_f64().unwrap()
+                                        * web_window.device_pixel_ratio(),
+                                    web_window.inner_height().unwrap().as_f64().unwrap()
+                                        * web_window.device_pixel_ratio(), //relevant to the commend below
                                 );
-                                let _ = window.request_inner_size(PhysicalSize::new(w / ratio / ratio, h / ratio / ratio));
+
+                                let _ = window.request_inner_size(PhysicalSize::new(
+                                    w / ratio / ratio,
+                                    h / ratio / ratio,
+                                ));
 
                                 //instead of just scaling by the pixel ratio, do it twice so mobile devices are pixelated for more performance
                                 //if not scaled up the canvas will sit too small / too big in the corner.
                                 //ratio corrects for the previous division, and device_pixel_ratio() scales the canvas up to fullscreen
-                                let _ = window.canvas().unwrap().style().set_property("transform", &*format!{"scale({})", ratio * ratio});
-
+                                let _ = window.canvas().unwrap().style().set_property(
+                                    "transform",
+                                    &*format! {"scale({})", ratio * ratio},
+                                );
                             }
 
                             self.renderer.width = width as usize;
@@ -1332,11 +1501,14 @@ pub fn main() {
         .objects
         .insert("snow".to_string(), DrawableObject::empty());
 
+    //renderer.filters.push(Box::new(BoxBlurFilter { size: 2}));
+
     //TREE
     renderer.objects.get_mut("tree").unwrap().position =
         Box::<Vector3>::new(Vector3::new([0.0, -1.9, 0.0]));
     //renderer.containers.get_mut("tree").unwrap().position = Box::<Vector3>::new(Vector3::new([0.0, -1.2, 0.0]));
 
+    //yeah the vertices are hardcoded in, what about it
     let mut verts = [
         [0.0, 0.0, 1.0],
         [-0.866, 0.0, 0.5],
@@ -1512,7 +1684,7 @@ pub fn main() {
             pos: [0.0, -20.0],
             z: 1000.0, // render behind stuff
         },
-        text: "Crimas".to_string(),
+        text: "Christmas".to_string(),
         scale: 2.0,
         color: [255, 0, 0, 255],
         font: Font {
@@ -1600,16 +1772,7 @@ pub fn main() {
     let event_loop = EventLoop::new();
     match event_loop {
         Ok(event_loop) => {
-            let result = event_loop.run_app(&mut ControlFlowHandler {
-                window: None,
-                renderer,
-                last_render,
-                last_frame,
-                last_touch: None,
-                last_second_touch: None,
-                xrot: 0.0,
-                yrot: 0.0,
-            });
+            let result = event_loop.run_app(&mut ControlFlowHandler::new(renderer));
             match result {
                 Ok(..) => {
                     console_log!("Event loop exited with no errors");
