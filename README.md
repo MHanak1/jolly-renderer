@@ -1,11 +1,14 @@
 ## FEEL THE JOLLY SPIRIT YOU MORTAL!!!
 
 This is a project made in rust using [winit](https://github.com/rust-windowing/winit) and [softbuffer](https://github.com/rust-windowing/softbuffer). The entirety of rendering code is written from scratch (unfortunately that also means it renders on the CPU, but at this scale rendering is not a bottleneck)
-## Demo
 
-You can find the demo of the web version here: https://mhanak.net/christmas
+I have tried to make the code fairly modular, so you should be able to relatively easily adapt what it renders (that said if I didn't create a way to load meshes so you will have to hard code in vertices like I did)
 
-## Run it yourself
+## Running
+You can get both Windows and Linux executables, as well as the compiled web assembly in the Releases section. Keep in mind they may be outdated.
+
+You can also try the web version here: https://mhanak.net/christmas
+## Building it yourself
 #### Native
 To run the native desktop version run
 ``` bash
